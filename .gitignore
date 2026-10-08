@@ -1,0 +1,17 @@
+# Keep local model weights, recordings, generated speech, caches, and build output out of source control.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.env
+*.log
+models/local/
+data/
+recordings/
+
