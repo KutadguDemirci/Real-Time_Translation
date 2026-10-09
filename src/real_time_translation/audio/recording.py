@@ -6,7 +6,6 @@ from collections.abc import Callable
 from pathlib import Path
 import queue
 import threading
-import time
 import wave
 from typing import Any
 

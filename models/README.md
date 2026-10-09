@@ -31,8 +31,11 @@ python models/fetch_qwen_asr.py
 python models/fetch_qwen_tts_mlx.py
 ```
 
-The MLX Audio install script deliberately avoids its declared Transformers 5 dependency; Qwen ASR
-uses the pinned Transformers 4.57.6 runtime in this project. Qwen3-TTS uses the 0.6B Base 8-bit MLX checkpoint on macOS Apple Silicon. It is about 2 GB and
+The MLX Audio install script pins its version and installs without dependencies because Qwen ASR
+uses Transformers 4.57.6. This compatibility path has an upstream metadata mismatch: `pip check`
+will report MLX Audio's newer Transformers and Hugging Face Hub requirements even though the tested
+Qwen3-TTS path loads with the project's pinned versions. Revalidate it when upgrading either stack.
+Qwen3-TTS uses the 0.6B Base 8-bit MLX checkpoint on macOS Apple Silicon. It is about 2 GB and
 requires a local voice reference plus the exact transcript spoken in that clip. Voice Studio can
 transcribe longer recordings with the selected local ASR backend, save multiple named profiles
 under the user's application-data directory, and reuse a selected profile for live translation.

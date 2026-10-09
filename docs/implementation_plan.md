@@ -1,6 +1,8 @@
-# End-to-end implementation plan
+# Implementation scope and release validation
 
-Implement in order; each stage should leave the app launchable and provide actionable errors.
+This document records the intended end-to-end path and release criteria. Core application paths
+are implemented, while platform behavior and release acceptance still need the checks below; this
+document does not claim every item has been verified.
 
 1. **Project and settings:** complete packaging metadata, cross-platform config/model paths, structured logging, and typed settings. Add a startup screen that reports OS, architecture, memory, and config paths.
 2. **Local model contract:** implement manifest parsing, SHA-256 validation, license metadata checks, path containment, compatibility checks, and missing-model instructions. Keep model acquisition manual for now.
@@ -13,7 +15,7 @@ Implement in order; each stage should leave the app launchable and provide actio
 9. **Reliability and performance:** manually verify both directions, long pauses, rapid phrases, background noise, device changes, missing model files, corrupted hashes, and CPU-only startup on macOS and Windows. Record stage timings and memory use.
 10. **Release preparation:** document setup, supported OS/Python/dependency versions, model acquisition and licenses, privacy behavior, known language/accent limits, and build/package instructions. Add optional accelerators only after CPU behavior is stable.
 
-## Completion definition
+## Release acceptance criteria
 
 The implemented system is complete when a clean macOS or Windows machine can install the app,
 point it at verified local model assets, select a supported spoken and output language, translate

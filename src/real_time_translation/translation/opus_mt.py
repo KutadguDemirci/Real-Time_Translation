@@ -36,6 +36,19 @@ class OpusTranslator:
         "fr": "fra", "tr": "tur", "de": "deu", "es": "spa", "it": "ita", "zh": "zho",
     }
 
+    @staticmethod
+    def _pairs_for_languages(
+        source_lang: str, target_lang: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Select the same multilingual English-pivot route for every language pair."""
+        if source_lang == target_lang:
+            return ()
+        if source_lang == "en":
+            return (("en", "mul"),)
+        if target_lang == "en":
+            return (("mul", "en"),)
+        return (("mul", "en"), ("en", "mul"))
+
     def __init__(
         self,
         device: str | None = None,
@@ -101,12 +114,7 @@ class OpusTranslator:
             self._active_pairs = ()
             self.model_name = "identity"
             return
-        if source_lang == "en":
-            pairs = (("en", "mul"),)
-        elif target_lang == "en":
-            pairs = (("mul", "en"),)
-        else:
-            pairs = (("mul", "en"), ("en", "mul"))
+        pairs = self._pairs_for_languages(source_lang, target_lang)
         if (source_lang, target_lang) == (self.source_lang, self.target_lang):
             return
         self.unload()

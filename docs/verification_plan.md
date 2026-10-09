@@ -1,10 +1,10 @@
 # Manual verification plan
 
-Use this checklist during implementation; keep the suite local and avoid storing test audio unless
-the operator explicitly opts in.
+Use this checklist for release verification. Keep the suite local and avoid storing test audio
+unless the operator explicitly opts in.
 
 - Verify launch, model validation, CPU fallback, and UI responsiveness on macOS and Windows.
-- Exercise English→French and French→English with short phrases, long phrases, names, numbers, and punctuation.
+- Exercise English, French, Turkish, German, Spanish, Italian, and Mandarin input; check available target languages with short phrases, names, numbers, punctuation, and long phrases.
 - Confirm provisional ASR revisions update the UI and each final phrase is translated/spoken once.
 - Confirm rapid successive phrases stay ordered and playback never overlaps.
 - Measure capture-to-partial, phrase-end-to-translated-text, TTS generation, and playback-start timings.

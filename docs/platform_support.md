@@ -2,9 +2,10 @@
 
 ## Target
 
-Support current macOS and Windows versions that are supported by the selected Python, audio, and
-inference dependency wheels. Verify x64 and Apple Silicon separately; publish the actually tested
-matrix when implementation begins.
+The current live translation workflow is supported on macOS Apple Silicon. The bundled session
+requires a synthesizer, and the only implemented synthesizer uses MLX; Windows and Intel Macs
+therefore cannot currently start live translation. Keep broader OS targets as release goals until
+a compatible TTS adapter and end-to-end verification are available.
 
 ## Startup device configuration
 

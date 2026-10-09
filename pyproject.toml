@@ -1,4 +1,4 @@
-# Project metadata and dependency groups for the eventual installable cross-platform app.
+# Project metadata and dependency groups for the installable desktop app.
 # Runtime versions are pinned together for the local ASR, translation, and MLX TTS stack.
 [build-system]
 requires = ["setuptools>=69", "wheel"]
@@ -13,7 +13,6 @@ requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0", "Pillow>=10"]
 
 [project.optional-dependencies]
-desktop = []
 audio = ["numpy>=1.26", "sounddevice>=0.4.6"]
 inference = ["numpy>=1.26", "sherpa-onnx>=1.10,<2"]
 qwen-asr = ["torch==2.6.0", "transformers==4.57.6", "qwen-asr>=0.0.6,<0.1"]

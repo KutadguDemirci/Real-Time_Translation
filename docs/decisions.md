@@ -11,11 +11,10 @@
 - Keep downloaded model files local and outside source control; validate exact assets and licenses.
 - No raw audio retention by default; collect local per-stage timing only.
 
-## Open until implementation
+## Open validation items
 
-- Exact ASR model revisions and licenses.
-- Translation runtime/export format and conversion verification.
+- Verify the exact ASR revisions and license obligations for redistribution.
 - Measure Qwen3-TTS 0.6B Base MLX latency and memory use on Apple Silicon.
-- Supported macOS/Windows versions, packaging method, and minimum memory/CPU expectations.
-- Endpoint pause, audio frame size, queue sizes, and measured latency targets.
+- Publish tested macOS/Windows versions, packaging method, and minimum memory/CPU expectations.
+- Tune endpoint pause, audio frame size, queue sizes, and latency targets from real-device measurements.
 

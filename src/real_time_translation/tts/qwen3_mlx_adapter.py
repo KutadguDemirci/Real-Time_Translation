@@ -11,7 +11,6 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
-import wave
 
 from .audio_reference import validate_reference_audio
 from .base import BUILT_IN_VOICES, SUPPORTED_TTS_LANGUAGES, SpeechResult, SynthesisOptions

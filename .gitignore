@@ -11,6 +11,7 @@ dist/
 *.egg-info/
 .env
 *.log
+.DS_Store
 models/local/
 data/
 recordings/
