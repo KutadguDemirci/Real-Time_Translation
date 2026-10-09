@@ -63,7 +63,7 @@ def main() -> int:
     asset = {
         "id": ASSET_ID,
         "task": "streaming-asr",
-        "languages": ["en", "fr"],
+        "languages": ["en", "fr", "tr", "de", "es", "it", "zh"],
         "revision": revision,
         "runtime": "Qwen3-ASR 0.6B; vLLM streaming or Transformers phrase mode",
         "files": relative_files,

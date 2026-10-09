@@ -1,5 +1,5 @@
 # Project metadata and dependency groups for the eventual installable cross-platform app.
-# Keep model/runtime versions pinned after the selected wheels and model files are verified on macOS and Windows.
+# Runtime versions are pinned together for the local ASR, translation, and MLX TTS stack.
 [build-system]
 requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -7,21 +7,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "local-realtime-translation"
 version = "0.1.0"
-description = "Local French-English microphone translation with speech output"
+description = "Local multilingual microphone translation with speech output"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["PyYAML>=6.0", "Pillow>=10"]
 
 [project.optional-dependencies]
-# Piper is GPL-3.0-or-later; verify distribution obligations and each voice's separate license.
 desktop = []
 audio = ["numpy>=1.26", "sounddevice>=0.4.6"]
 inference = ["numpy>=1.26", "sherpa-onnx>=1.10,<2"]
-qwen-asr = ["torch>=2.2", "qwen-asr>=0.0.6,<0.1"]
+qwen-asr = ["torch==2.6.0", "transformers==4.57.6", "qwen-asr>=0.0.6,<0.1"]
 # Qwen's official incremental API is vLLM-backed; keep that larger Linux runtime opt-in.
-qwen-asr-streaming = ["torch>=2.2", "qwen-asr[vllm]>=0.0.6,<0.1; sys_platform == 'linux'"]
-tts = ["piper-tts>=1.8,<2"]
-translation = ["torch>=2.2", "transformers>=4.41,<5", "sentencepiece>=0.2"]
+qwen-asr-streaming = ["torch==2.6.0", "transformers==4.57.6", "qwen-asr[vllm]>=0.0.6,<0.1; sys_platform == 'linux'"]
+tts = [
+    "mlx==0.32.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "miniaudio>=1.61; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "transformers==4.57.6",
+    "huggingface_hub==0.36.2",
+    "safetensors==0.5.3",
+]
+translation = ["torch==2.6.0", "transformers==4.57.6", "sentencepiece>=0.2", "huggingface_hub==0.36.2"]
 dev = ["ruff", "mypy"]
 
 [project.scripts]
@@ -30,6 +35,9 @@ local-translator = "real_time_translation.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+real_time_translation = ["assets/*.wav"]
 
 [tool.ruff]
 line-length = 100

@@ -2,9 +2,10 @@
 
 ## Product scope
 
-- Local microphone translation, French ↔ English, both directions.
+- Local microphone translation for English, French, Turkish, German, Spanish, Italian, and Mandarin Chinese.
+- Turkish is an input/translation language only; output speech choices are limited to the current Qwen3-TTS language set.
 - macOS and Windows support; no GPU prerequisite.
-- Manual source-language selection avoids an auto-detection delay and makes the correct ASR model explicit.
+- Manual source and output selection avoids an auto-detection delay and makes the correct ASR model explicit.
 - Translate/speak only after a short phrase boundary in v1. Live transcript text may be provisional.
 - Models live on the user's computer. Runtime inference is local and audio is not stored by default.
 
@@ -17,7 +18,7 @@ Microphone -> frame queue -> VAD + selected streaming ASR
                                       ├── partial text -> UI
                                       └── phrase committer -> ordered phrase queue
                                                                │
-                                              direction-specific local MT
+                                          local multilingual MT via English
                                                                │
                                                local target-language TTS
                                                                │

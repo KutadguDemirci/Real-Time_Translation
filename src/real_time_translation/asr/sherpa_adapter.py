@@ -15,7 +15,7 @@ import re
 from typing import Any
 
 from real_time_translation.asr.base import RecognitionUpdate
-from real_time_translation.domain.languages import SUPPORTED_LANGUAGES
+SHERPA_LANGUAGES = ("en", "fr")
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +84,8 @@ class SherpaStreamingRecognizer:
         provider: str = "cpu",
         sherpa_module: Any | None = None,
     ) -> None:
-        if language not in SUPPORTED_LANGUAGES:
-            raise ValueError(f"Unsupported ASR language {language!r}; expected en or fr.")
+        if language not in SHERPA_LANGUAGES:
+            raise ValueError(f"Sherpa-ONNX is configured only for English and French, not {language!r}.")
         if provider not in ("cpu", "cuda", "coreml"):
             raise ValueError("provider must be one of: cpu, cuda, coreml")
         if num_threads is not None and num_threads < 1:

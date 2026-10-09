@@ -19,7 +19,10 @@ from real_time_translation.domain.languages import SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
-_LANGUAGE_NAMES = {"en": "English", "fr": "French"}
+_LANGUAGE_NAMES = {
+    "en": "English", "fr": "French", "tr": "Turkish", "de": "German",
+    "es": "Spanish", "it": "Italian", "zh": "Chinese",
+}
 
 
 class QwenStreamingRecognizer:
@@ -50,7 +53,7 @@ class QwenStreamingRecognizer:
         enable_streaming: bool | None = None,
     ) -> None:
         if language not in SUPPORTED_LANGUAGES:
-            raise ValueError(f"Unsupported ASR language {language!r}; expected en or fr.")
+            raise ValueError(f"Unsupported ASR language {language!r}; expected one of {', '.join(SUPPORTED_LANGUAGES)}.")
         if len(context) > 2000:
             raise ValueError("Qwen ASR context must be 2000 characters or fewer.")
         self.model_dir = Path(model_dir).expanduser().resolve()
@@ -93,10 +96,20 @@ class QwenStreamingRecognizer:
                 self._model = qwen_module.Qwen3ASRModel.from_pretrained(
                     str(self.model_dir),
                     dtype=dtype,
-                    device_map="auto",
+                    device_map=torch_device,
                     max_inference_batch_size=1,
                     max_new_tokens=256,
                 )
+                if torch_device == "mps":
+                    # Qwen's outer config accepts attn_implementation, but its
+                    # nested Thinker/audio/text configs retain SDPA. PyTorch
+                    # 2.6 MPS SDPA crashes on GQA (16 query heads, 8 KV heads).
+                    # Eager attention explicitly expands KV heads and runs on MPS.
+                    for module in self._model.model.modules():
+                        config = getattr(module, "config", None)
+                        if config is not None and hasattr(config, "_attn_implementation"):
+                            config._attn_implementation = "eager"
+                    logger.info("Configured Qwen nested attention blocks for MPS-compatible eager GQA")
                 self._state = None
         except Exception as error:
             if self._mode == "streaming":
@@ -117,7 +130,13 @@ class QwenStreamingRecognizer:
         self._pending_parts: list[Any] = []
         self._pending_samples = 0
         self._closed = False
-        logger.info("Qwen3-ASR initialized in %s mode for %s", self._mode, language)
+        model_device = getattr(self._model, "device", torch_device)
+        logger.info(
+            "Qwen3-ASR initialized in %s mode for %s on %s",
+            self._mode,
+            language,
+            model_device,
+        )
 
     @property
     def mode(self) -> str:

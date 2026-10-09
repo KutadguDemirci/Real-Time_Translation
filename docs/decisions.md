@@ -3,7 +3,8 @@
 ## Accepted
 
 - Local inference on the user's Mac or Windows computer; no Hugging Face hosting in the current scope.
-- French ↔ English, both directions, selected manually.
+- English, French, Turkish, German, Spanish, Italian, and Mandarin Chinese source languages, selected manually; output language is selected separately.
+- Turkish speech output is omitted; supported Turkish source phrases can be translated into a Qwen3-TTS output language.
 - Modular pipeline: streaming ASR → short phrase commit → text MT → TTS → ordered playback.
 - Simple phrase-at-pause output for v1; optimize simultaneity later.
 - CPU baseline with optional acceleration and fallback; no GPU prerequisite.
@@ -14,7 +15,7 @@
 
 - Exact ASR model revisions and licenses.
 - Translation runtime/export format and conversion verification.
-- Exact English and French TTS voices and their individual licenses.
+- Measure Qwen3-TTS 0.6B Base MLX latency and memory use on Apple Silicon.
 - Supported macOS/Windows versions, packaging method, and minimum memory/CPU expectations.
 - Endpoint pause, audio frame size, queue sizes, and measured latency targets.
 

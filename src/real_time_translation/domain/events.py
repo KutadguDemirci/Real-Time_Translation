@@ -5,7 +5,7 @@ from enum import StrEnum
 import math
 from typing import TypeAlias
 
-from .languages import target_for
+from .languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES
 from .segments import Phrase, TranscriptSegment
 
 
@@ -68,8 +68,10 @@ class TranslationCompleted:
 
     def __post_init__(self) -> None:
         _validate_phrase_id(self.phrase_id)
-        if target_for(self.source_language) != self.target_language:
-            raise ValueError("translation languages do not form a supported direction")
+        if self.source_language not in SUPPORTED_LANGUAGES or self.target_language not in SUPPORTED_LANGUAGES:
+            raise ValueError("translation languages must be supported")
+        if self.source_language == self.target_language:
+            raise ValueError("source and target languages must differ")
         _timestamp(self.completed_at)
         _duration(self.inference_time_ms)
         if not self.text.strip():
@@ -90,7 +92,7 @@ class SynthesizedAudio:
 
     def __post_init__(self) -> None:
         _validate_phrase_id(self.phrase_id)
-        if self.target_language not in ("en", "fr"):
+        if self.target_language not in SPEECH_LANGUAGES:
             raise ValueError(f"Unsupported target language: {self.target_language!r}")
         _timestamp(self.completed_at)
         _duration(self.synthesis_time_ms)

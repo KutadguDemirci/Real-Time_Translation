@@ -18,7 +18,7 @@ from real_time_translation.domain.events import (
     DomainEvent, LatencyRecorded, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
     SynthesizedAudio, TranscriptUpdated, TranslationCompleted,
 )
-from real_time_translation.domain.languages import target_for
+from real_time_translation.domain.languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES, target_for
 from real_time_translation.domain.segments import Phrase
 from real_time_translation.pipeline.phrase_committer import PhraseCommitter
 from real_time_translation.pipeline.timing import TimingCollector
@@ -45,13 +45,19 @@ class SessionCoordinator:
         synthesizer: SpeechSynthesizer,
         playback: AudioPlayback,
         source_language: str,
+        target_language: str | None = None,
         *,
         on_event: Callable[[DomainEvent], None] | None = None,
         phrase_queue_size: int = 8,
         frame_timeout: float = 0.1,
         timing: TimingCollector | None = None,
     ) -> None:
-        target_for(source_language)
+        if target_language is None:
+            target_language = target_for(source_language)
+        if source_language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported source language: {source_language!r}")
+        if target_language not in SPEECH_LANGUAGES or target_language == source_language:
+            raise ValueError(f"Unsupported output language for source {source_language!r}: {target_language!r}")
         if recognizer.language != source_language:
             raise ValueError("Recognizer language must match the selected source language.")
         if phrase_queue_size < 1 or frame_timeout <= 0:
@@ -68,11 +74,11 @@ class SessionCoordinator:
         self.synthesizer = synthesizer
         self.playback = playback
         self.source_language = source_language
-        self.target_language = target_for(source_language)
+        self.target_language = target_language
         self.on_event = on_event or (lambda event: None)
         self.frame_timeout = frame_timeout
         self.timing = timing or TimingCollector()
-        self.committer = PhraseCommitter(source_language)
+        self.committer = PhraseCommitter(source_language, target_language)
         self._phrases: queue.Queue[Phrase | None] = queue.Queue(phrase_queue_size)
         self._stop = threading.Event()
         self._state_lock = threading.Lock()

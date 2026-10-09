@@ -150,8 +150,10 @@ class AudioPlayback:
                     samples = samples[:, :output_channels]
                 elif samples.ndim == 2 and samples.shape[1] < output_channels:
                     samples = np.repeat(samples[:, :1], output_channels, axis=1)
-                # Schedule output first so failures are reported before we mark the phrase
-                # as started. Waiting separately keeps this worker's queue strictly ordered.
+                # Keep sounddevice's supported high-level playback path. The two
+                # AudioPlayback instances share sounddevice's module-global stream,
+                # so callers must serialize playback instead of opening competing
+                # output streams.
                 sd.play(samples, samplerate=output_rate, device=self.device, blocking=False)
                 callback = self.on_playback_started
                 if callback is not None:

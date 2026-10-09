@@ -1,7 +1,7 @@
 """Local target-language speech synthesis adapters."""
 
-from .base import SpeechResult, SpeechSynthesizer
-from .piper_adapter import PiperSynthesizer
+from .base import SpeechResult, SpeechSynthesizer, SynthesisOptions
+from .qwen3_mlx_adapter import Qwen3MLXSynthesizer
 
-__all__ = ["PiperSynthesizer", "SpeechResult", "SpeechSynthesizer"]
+__all__ = ["Qwen3MLXSynthesizer", "SpeechResult", "SpeechSynthesizer", "SynthesisOptions"]
 

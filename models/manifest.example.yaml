@@ -24,7 +24,7 @@ models:
     attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
   - id: asr-qwen3
     task: streaming-asr
-    languages: [en, fr]
+    languages: [en, fr, tr, de, es, it, zh]
     revision: "REPLACE_WITH_EXACT_QWEN_MODEL_REVISION"
     runtime: "Qwen3-ASR 0.6B; vLLM streaming or Transformers phrase mode"
     files: ["asr/qwen3-asr-0.6b/REPLACE_WITH_MODEL_FILE"]
@@ -33,46 +33,36 @@ models:
     license_url: "https://huggingface.co/Qwen/Qwen3-ASR-0.6B"
     attribution: "Qwen3-ASR model by the Qwen team; see the model card and license."
     optional: true
-  - id: translation-en-fr
+  - id: translation-mul-en
     task: translation
-    source: en
-    target: fr
-    revision: "REPLACE_WITH_EXACT_REVISION"
-    runtime: "REPLACE_WITH_VERIFIED_RUNTIME"
-    files: ["translation/en-fr/REPLACE_WITH_MODEL_FILES"]
-    sha256: ["REPLACE_WITH_SHA256_PER_FILE"]
-    weight_license: "Apache-2.0"
-    license_url: "https://huggingface.co/Helsinki-NLP/opus-mt-en-fr"
-    attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
-  - id: translation-fr-en
-    task: translation
-    source: fr
+    source: mul
     target: en
     revision: "REPLACE_WITH_EXACT_REVISION"
-    runtime: "REPLACE_WITH_VERIFIED_RUNTIME"
-    files: ["translation/fr-en/REPLACE_WITH_MODEL_FILES"]
+    runtime: "Helsinki-NLP OPUS-MT multilingual MarianMT (PyTorch)"
+    files: ["translation/mul-en/REPLACE_WITH_MODEL_FILES"]
     sha256: ["REPLACE_WITH_SHA256_PER_FILE"]
     weight_license: "Apache-2.0"
-    license_url: "https://huggingface.co/Helsinki-NLP/opus-mt-fr-en"
-    attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
-  - id: tts-en
-    task: tts
-    languages: [en]
+    license_url: "https://huggingface.co/Helsinki-NLP/opus-mt-mul-en"
+    attribution: "Helsinki-NLP OPUS-MT multilingual-to-English; see model card."
+  - id: translation-en-mul
+    task: translation
+    source: en
+    target: mul
     revision: "REPLACE_WITH_EXACT_REVISION"
-    runtime: "REPLACE_WITH_VERIFIED_RUNTIME"
-    files: ["tts/en/REPLACE_WITH_VOICE_FILES"]
+    runtime: "Helsinki-NLP OPUS-MT multilingual MarianMT (PyTorch)"
+    files: ["translation/en-mul/REPLACE_WITH_MODEL_FILES"]
     sha256: ["REPLACE_WITH_SHA256_PER_FILE"]
-    weight_license: "REPLACE_WITH_VOICE_LICENSE"
-    license_url: "REPLACE_WITH_VOICE_LICENSE_URL"
-    attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
-  - id: tts-fr
+    weight_license: "Apache-2.0"
+    license_url: "https://huggingface.co/Helsinki-NLP/opus-mt-en-mul"
+    attribution: "Helsinki-NLP OPUS-MT English-to-multilingual; see model card."
+  - id: tts-qwen3-mlx-8bit
     task: tts
-    languages: [fr]
-    revision: "REPLACE_WITH_EXACT_REVISION"
-    runtime: "REPLACE_WITH_VERIFIED_RUNTIME"
-    files: ["tts/fr/REPLACE_WITH_VOICE_FILES"]
+    languages: [en, fr, de, it, pt, es, zh, ja, ko, ru]
+    revision: "REPLACE_WITH_EXACT_HUGGING_FACE_COMMIT"
+    runtime: "Qwen3-TTS 0.6B Base 8-bit through MLX Audio"
+    files: ["tts/qwen3-tts-0.6b-base-8bit/REPLACE_WITH_MODEL_FILES"]
     sha256: ["REPLACE_WITH_SHA256_PER_FILE"]
-    weight_license: "REPLACE_WITH_VOICE_LICENSE"
-    license_url: "REPLACE_WITH_VOICE_LICENSE_URL"
-    attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
+    weight_license: "Apache-2.0"
+    license_url: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit"
+    attribution: "Qwen3-TTS by Alibaba Cloud; MLX 8-bit conversion by mlx-community."
 

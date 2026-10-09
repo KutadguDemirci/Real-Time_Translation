@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import math
 
-from .languages import target_for
+from .languages import SUPPORTED_LANGUAGES
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,8 @@ class TranscriptSegment:
     is_final: bool = False
 
     def __post_init__(self) -> None:
-        target_for(self.language)
+        if self.language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported transcript language: {self.language!r}")
         _validate_times(self.started_at, self.updated_at)
         if not isinstance(self.text, str):
             raise TypeError("text must be a string")
@@ -38,11 +39,10 @@ class Phrase:
     committed_at: float
 
     def __post_init__(self) -> None:
-        expected_target = target_for(self.source_language)
-        if self.target_language != expected_target:
-            raise ValueError(
-                f"target language for {self.source_language!r} must be {expected_target!r}"
-            )
+        if self.source_language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported source language: {self.source_language!r}")
+        if self.target_language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported target language: {self.target_language!r}")
         if not self.phrase_id or not self.phrase_id.strip():
             raise ValueError("phrase_id must not be empty")
         if not isinstance(self.text, str) or not self.text.strip():

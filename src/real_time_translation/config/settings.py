@@ -10,6 +10,8 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping
 
+from real_time_translation.domain.languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,6 +20,7 @@ class Settings:
     """Non-secret preferences for a local translation session."""
 
     source_language: str = "en"
+    target_language: str = "fr"
     input_device_id: int | None = None
     output_device_id: int | None = None
     endpoint_pause_ms: int = 800
@@ -27,6 +30,9 @@ class Settings:
     model_profile: str = "auto"
     diagnostic_capture: bool = False
     bubble_opacity: float = 0.6
+    tts_voice_id: str = "voice_1"
+    tts_profile_id: str | None = None
+    tts_temperature: float = 0.9
 
 
 def default_config_dir() -> Path:
@@ -125,8 +131,12 @@ def save_settings(settings: Settings, path: str | Path | None = None) -> Path:
 
 def _validate(name: str, value: Any) -> Any:
     if name == "source_language":
-        if not isinstance(value, str) or value.strip().lower() not in {"en", "fr"}:
-            raise ValueError("expected 'en' or 'fr'")
+        if not isinstance(value, str) or value.strip().lower() not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"expected one of {', '.join(SUPPORTED_LANGUAGES)}")
+        return value.strip().lower()
+    if name == "target_language":
+        if not isinstance(value, str) or value.strip().lower() not in SPEECH_LANGUAGES:
+            raise ValueError(f"expected one of {', '.join(SPEECH_LANGUAGES)}")
         return value.strip().lower()
     if name in {"input_device_id", "output_device_id"}:
         if value is None:
@@ -167,4 +177,21 @@ def _validate(name: str, value: Any) -> Any:
         if not math.isfinite(opacity) or not 0.0 <= opacity <= 1.0:
             raise ValueError("expected a number between 0 and 1")
         return opacity
+    if name == "tts_voice_id":
+        if not isinstance(value, str) or value not in {"voice_1", "voice_2"}:
+            raise ValueError("expected one of the two built-in voice IDs")
+        return value
+    if name == "tts_profile_id":
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip() or len(value) > 64:
+            raise ValueError("expected a voice profile ID or null")
+        return value.strip()
+    if name == "tts_temperature":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("expected a number between 0.1 and 1.5")
+        temperature = float(value)
+        if not math.isfinite(temperature) or not 0.1 <= temperature <= 1.5:
+            raise ValueError("expected a number between 0.1 and 1.5")
+        return temperature
     raise ValueError(f"unknown setting {name!r}")

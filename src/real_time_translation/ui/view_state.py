@@ -35,4 +35,7 @@ def session_view_state(status: SessionStatus) -> SessionViewState:
 
 def language_name(code: str) -> str:
     """Return a human-readable name for a supported language code."""
-    return {"en": "English", "fr": "French"}.get(code, code.upper())
+    return {
+        "en": "English", "fr": "French", "tr": "Turkish", "de": "German",
+        "es": "Spanish", "it": "Italian", "zh": "Chinese (Mandarin)",
+    }.get(code, code.upper())

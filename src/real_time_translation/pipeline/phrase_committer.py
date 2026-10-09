@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from real_time_translation.asr.base import RecognitionUpdate
-from real_time_translation.domain.languages import target_for
+from real_time_translation.domain.languages import SUPPORTED_LANGUAGES, target_for
 from real_time_translation.domain.segments import Phrase, TranscriptSegment
 
 
@@ -15,9 +15,14 @@ class PhraseCommitter:
     later identical utterance to become a distinct phrase.
     """
 
-    def __init__(self, source_language: str) -> None:
-        target_for(source_language)
+    def __init__(self, source_language: str, target_language: str | None = None) -> None:
+        fallback_target = target_for(source_language) if target_language is None else target_language
+        if source_language not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported source language: {source_language!r}")
+        if fallback_target not in SUPPORTED_LANGUAGES or fallback_target == source_language:
+            raise ValueError(f"Unsupported target language for source {source_language!r}.")
         self.source_language = source_language
+        self.target_language = target_language or fallback_target
         self._started_at: float | None = None
         self._latest: RecognitionUpdate | None = None
         self._last_revision = -1
@@ -55,7 +60,7 @@ class PhraseCommitter:
             phrase_id=f"phrase-{self._next_id}",
             text=latest.text.strip(),
             source_language=self.source_language,
-            target_language=target_for(self.source_language),
+            target_language=self.target_language,
             started_at=started_at,
             committed_at=committed_at,
         )

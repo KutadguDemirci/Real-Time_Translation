@@ -12,6 +12,7 @@ import ctypes
 from dataclasses import replace
 import logging
 import os
+from pathlib import Path
 import queue
 import subprocess
 import struct
@@ -31,11 +32,14 @@ from real_time_translation.domain.events import (
     DomainEvent, LatencyRecorded, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
     SynthesizedAudio, TranscriptUpdated, TranslationCompleted,
 )
-from real_time_translation.domain.languages import target_for
+from real_time_translation.domain.languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES
 from real_time_translation.ui.view_state import language_name, session_view_state
+from real_time_translation.ui.voice_studio import VoiceStudio
+from real_time_translation.tts.base import BUILT_IN_VOICES, SynthesisOptions
 
 logger = logging.getLogger(__name__)
-CoordinatorFactory = Callable[[str, Callable[[DomainEvent], None], Settings], Any]
+CoordinatorFactory = Callable[[str, str, Callable[[DomainEvent], None], Settings], Any]
+VoiceTranscriber = Callable[[Path, str, str, str], str]
 
 LATENCY_STAGES = (
     "Audio backlog", "VAD compute", "Endpoint silence", "Streaming ASR",
@@ -58,6 +62,8 @@ class DesktopApp:
         setup_error: str = "",
         device_label: str = "CPU",
         settings: Settings | None = None,
+        synthesizer: Any | None = None,
+        voice_transcriber: VoiceTranscriber | None = None,
     ) -> None:
         if root is None:
             _enable_dpi_awareness()
@@ -68,12 +74,16 @@ class DesktopApp:
         self.setup_error = setup_error
         self.device_label = device_label
         self.settings = settings or Settings()
+        self.synthesizer = synthesizer
+        self.voice_transcriber = voice_transcriber
+        self.voice_studio: VoiceStudio | None = None
         self.events: queue.Queue[DomainEvent] = queue.Queue(maxsize=200)
         self.coordinator: Any | None = None
         self._worker: threading.Thread | None = None
         self._closing = False
         self.source = tk.StringVar(value=self.settings.source_language)
         self.source_display = tk.StringVar(value=language_name(self.settings.source_language))
+        self.target = tk.StringVar(value=language_name(self.settings.target_language))
         self.status_text = tk.StringVar(value="Ready")
         self.status_detail = tk.StringVar(value="Choose a language and start listening.")
         self.input_device = tk.StringVar(value="Default microphone")
@@ -158,7 +168,7 @@ class DesktopApp:
             1, 1, anchor="nw", tags="glass")
         self._config_glass_image: tk.PhotoImage | None = None
         self.config_header = self.config_panel.create_text(
-            20, 17, text="Configuration  ▾", anchor="w", fill="#173735",
+            0, 17, text="Configuration", anchor="n", fill="#173735",
             font=("Avenir Next", 13, "bold"), tags=("config-header",))
         self.config_panel.tag_bind("config-header", "<Enter>",
                                    lambda _event: self.config_panel.configure(cursor="hand2"))
@@ -176,14 +186,22 @@ class DesktopApp:
             self._config_content_items.append(item)
             return item
 
-        self.language_box = ttk.Combobox(self.config_panel, textvariable=self.source_display,
-                                         state="readonly", values=("English", "French"), width=18)
+        self.language_box = ttk.Combobox(
+            self.config_panel, textvariable=self.source_display, state="readonly",
+            values=tuple(language_name(code) for code in SUPPORTED_LANGUAGES), width=18,
+        )
         self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
         self._source_window = self.config_panel.create_window(0, 0, window=self.language_box,
                                                               anchor="nw", tags="config-content")
         config_label("I’m speaking", .03, 48)
         config_label("Output language", .29, 48)
-        self._direction_item = config_label(language_name(target_for(self.source.get())), .29, 96)
+        self.target_box = ttk.Combobox(
+            self.config_panel, textvariable=self.target, state="readonly",
+            values=tuple(language_name(code) for code in SPEECH_LANGUAGES), width=18,
+        )
+        self.target_box.bind("<<ComboboxSelected>>", self._target_language_changed)
+        self._target_window = self.config_panel.create_window(0, 0, window=self.target_box,
+                                                              anchor="nw", tags="config-content")
         config_label("ASR engine", .55, 48)
 
         self.asr_box = ttk.Combobox(self.config_panel, textvariable=self.asr_backend, state="readonly",
@@ -262,10 +280,14 @@ class DesktopApp:
                                        command=self.start)
         self.stop_button = ttk.Button(self.surface, text="Stop", style="Stop.TButton",
                                       command=self.stop, state="disabled")
+        self.voice_button = ttk.Button(self.surface, text="Voice Studio", style="Secondary.TButton",
+                                       command=self.open_voice_studio)
         self._start_window = self.surface.create_window(0, 0, window=self.start_button,
                                                         anchor="e", width=140, height=38)
         self._stop_window = self.surface.create_window(0, 0, window=self.stop_button,
                                                        anchor="e", width=72, height=38)
+        self._voice_window = self.surface.create_window(0, 0, window=self.voice_button,
+                                                        anchor="e", width=112, height=38)
         self._status_item = self.surface.create_text(
             0, 0, text="", anchor="w", fill="#ffffff",
             font=("Avenir Next", 15, "bold"), tags="footer-text")
@@ -281,6 +303,14 @@ class DesktopApp:
 
         self._config_window = self.surface.create_window(36, 28, window=self.config_panel, anchor="nw")
         self._conversation_window = self.surface.create_window(36, 0, window=self.conversation, anchor="nw")
+        self.clear_log_button = ttk.Button(
+            self.surface, text="Clear messages", style="Secondary.TButton",
+            command=self._clear_message_log,
+        )
+        self.clear_log_button.state(["disabled"])
+        self._clear_log_window = self.surface.create_window(
+            0, 0, window=self.clear_log_button, anchor="se", width=116, height=32,
+        )
         self.surface.bind("<Configure>", self._schedule_surface_layout)
         self._message_data: dict[str, dict[str, Any]] = {}
         self._message_layout: list[tuple[str, float, float]] = []
@@ -297,7 +327,7 @@ class DesktopApp:
         self._configuration_expanded = not self._configuration_expanded
         self.config_panel.itemconfigure(
             self.config_header,
-            text="Configuration  ▾" if self._configuration_expanded else "Configuration  ▸",
+            text="Configuration",
         )
         if self._configuration_expanded:
             self.config_panel.itemconfigure("config-content", state="normal")
@@ -332,7 +362,7 @@ class DesktopApp:
             return
         self.config_panel.coords(
             self._config_glass, 1, 1)
-        self.config_panel.coords(self.config_header, 22, 19)
+        self.config_panel.coords(self.config_header, width / 2, 19)
         if self._glass_resize_after is not None:
             self.root.after_cancel(self._glass_resize_after)
         self._glass_resize_after = self.root.after(120, self._render_config_glass)
@@ -346,9 +376,7 @@ class DesktopApp:
             "Speakers": (.35, 219), "End of speech wait": (.67, 219),
         }
         for item in self._config_content_items:
-            if item == self._direction_item:
-                self.config_panel.coords(item, .29 * width, 96)
-            elif item == self._opacity_value_item:
+            if item == self._opacity_value_item:
                 self.config_panel.coords(item, .25 * width, 151)
             else:
                 text = self.config_panel.itemcget(item, "text")
@@ -356,7 +384,8 @@ class DesktopApp:
                 self.config_panel.coords(item, fraction * width, y)
         col = max(115, width * .23)
         for window, fraction, wid in (
-            (self._source_window, .03, col), (self._asr_window, .55, col),
+            (self._source_window, .03, col), (self._target_window, .29, col),
+            (self._asr_window, .55, col),
             (self._switch_window, .82, max(75, width * .14)),
             (self._context_window, .29, max(130, width * .68)),
             (self._opacity_window, .03, max(135, width * .24)),
@@ -414,11 +443,14 @@ class DesktopApp:
                                             empty_center - conversation_height / 2))
         self.surface.coords(self._conversation_window, margin, y)
         self.surface.itemconfigure(self._conversation_window, width=conversation_width, height=conversation_height)
+        self.surface.coords(self._clear_log_window, margin + panel_width - 12,
+                            y + conversation_height - 10)
         self.surface.coords(self._status_item, margin + 4, height - 39)
         self.surface.coords(self._status_detail_item, margin + 4, height - 16)
         self.surface.coords(self._error_item, margin + 4, height - 62)
         self.surface.itemconfigure(self._error_item, width=max(120, panel_width - 260))
         self.surface.coords(self._stop_window, margin + panel_width - 148, height - 28)
+        self.surface.coords(self._voice_window, margin + panel_width - 276, height - 28)
         self.surface.coords(self._start_window, margin + panel_width - 8, height - 28)
 
     def _schedule_surface_layout(self, _event: object = None) -> None:
@@ -503,7 +535,24 @@ class DesktopApp:
 
     def _add_bubble(self, phrase_id: str, original: str, translated: str) -> None:
         self._message_data[phrase_id] = {"original": original, "translated": translated}
+        self.clear_log_button.state(["!disabled"])
         self._content_height = self._measure_message_content()
+        self._cancel_scheduled_message_render()
+        self._render_messages()
+
+    def _clear_message_log(self) -> None:
+        """Clear the visible conversation and its cached per-phrase diagnostics."""
+        self._message_data.clear()
+        self._message_layout.clear()
+        self._phrase_latencies.clear()
+        self._phrase_latency_times.clear()
+        self._phrase_text.clear()
+        self._phrase_started.clear()
+        self._expanded_phrases.clear()
+        self._focused_phrase = None
+        self._user_scrolling = False
+        self.clear_log_button.state(["disabled"])
+        self._content_height = 48
         self._cancel_scheduled_message_render()
         self._render_messages()
 
@@ -688,19 +737,43 @@ class DesktopApp:
 
 
     def _language_changed(self, _event: object = None) -> None:
-        self.source.set("en" if self.source_display.get() == "English" else "fr")
+        self.source.set(next(code for code in SUPPORTED_LANGUAGES
+                             if language_name(code) == self.source_display.get()))
         source = self.source.get()
-        self.config_panel.itemconfigure(
-            self._direction_item,
-            text=language_name(target_for(source)))
+        target_code = next((code for code in SPEECH_LANGUAGES
+                            if language_name(code) == self.target.get()), "fr")
+        if target_code == source:
+            target_code = "en" if source != "en" else "fr"
+        self.target.set(language_name(target_code))
+        if self.error_text.get() == "Choose a different output language from the spoken language.":
+            self.error_text.set("")
+        if source not in {"en", "fr"} and ASR_BACKENDS.get(self.asr_backend.get()) != "qwen":
+            self.asr_backend.set("Qwen3-ASR")
+            self._asr_backend_changed()
+        self.switch_button.configure(state="disabled" if source == "tr" else "normal")
+
+    def _target_language_changed(self, _event: object = None) -> None:
+        target = next(code for code in SPEECH_LANGUAGES
+                      if language_name(code) == self.target.get())
+        if target == self.source.get():
+            self.error_text.set("Choose a different output language from the spoken language.")
+        else:
+            self.error_text.set("")
 
     def _asr_backend_changed(self, _event: object = None) -> None:
         state = "normal" if ASR_BACKENDS.get(self.asr_backend.get()) == "qwen" else "disabled"
         self.asr_context_entry.configure(state=state)
 
     def _switch_language(self) -> None:
-        self.source.set("fr" if self.source.get() == "en" else "en")
-        self.source_display.set(language_name(self.source.get()))
+        current_source = self.source.get()
+        current_target = next(code for code in SPEECH_LANGUAGES
+                              if language_name(code) == self.target.get())
+        if current_source not in SPEECH_LANGUAGES:
+            self.error_text.set("Turkish speech output is not available to switch into.")
+            return
+        self.source.set(current_target)
+        self.source_display.set(language_name(current_target))
+        self.target.set(language_name(current_source))
         self._language_changed()
 
     def _refresh_devices(self, silent: bool = False) -> None:
@@ -760,6 +833,12 @@ class DesktopApp:
         self._set_status(SessionStatus.STARTING, "Preparing local models and audio…")
         self.error_text.set("")
         source_language = self.source.get()
+        target_language = next(code for code in SPEECH_LANGUAGES
+                               if language_name(code) == self.target.get())
+        if source_language == target_language:
+            self.error_text.set("Choose a different output language from the spoken language.")
+            self._set_status(SessionStatus.ERROR, "Choose different input and output languages")
+            return
         input_id = self._selected_device(self.input_device.get(), self._input_devices)
         output_id = self._selected_device(self.output_device.get(), self._output_devices)
         try:
@@ -767,6 +846,7 @@ class DesktopApp:
             session_settings = replace(
                 self.settings,
                 source_language=source_language,
+                target_language=target_language,
                 input_device_id=input_id,
                 output_device_id=output_id,
                 endpoint_pause_ms=endpoint_pause_ms,
@@ -780,7 +860,9 @@ class DesktopApp:
 
         def launch() -> None:
             try:
-                coordinator = self.coordinator_factory(source_language, self._emit_event, session_settings)
+                coordinator = self.coordinator_factory(
+                    source_language, target_language, self._emit_event, session_settings
+                )
                 self.coordinator = coordinator
                 coordinator.start()
             except Exception as error:
@@ -805,6 +887,37 @@ class DesktopApp:
         self._worker = threading.Thread(target=stop_session, name="desktop-session-stop", daemon=True)
         self._worker.start()
 
+    def open_voice_studio(self) -> None:
+        if self.synthesizer is None:
+            self.error_text.set(self.setup_error or "Set up the local Qwen3-TTS MLX model files first.")
+            return
+        if self.voice_studio is not None and not self.voice_studio.closed:
+            self.voice_studio.window.lift()
+            return
+
+        def save_options(options: SynthesisOptions, profile_id: str | None) -> None:
+            self.synthesizer.set_default_options(options)
+            voice_id = options.voice_id if options.voice_id in BUILT_IN_VOICES else self.settings.tts_voice_id
+            self.settings = replace(
+                self.settings,
+                tts_voice_id=voice_id,
+                tts_profile_id=profile_id,
+                tts_temperature=float(options.temperature),
+            )
+
+        self.voice_studio = VoiceStudio(
+            self.root,
+            self.synthesizer,
+            self.settings,
+            output_device=self._selected_device(self.output_device.get(), self._output_devices),
+            input_device=self._selected_device(self.input_device.get(), self._input_devices),
+            source_language=self.source.get(),
+            asr_backend=ASR_BACKENDS.get(self.asr_backend.get(), "sherpa"),
+            asr_context=self.asr_context.get(),
+            transcriber=self.voice_transcriber,
+            on_options=save_options,
+        )
+
     def _set_status(self, status: SessionStatus, detail: str | None = None) -> None:
         view = session_view_state(status)
         self.status_text.set(view.label)
@@ -812,6 +925,7 @@ class DesktopApp:
         self.start_button.configure(state="disabled" if view.busy or view.running else "normal")
         self.stop_button.configure(state="normal" if view.running else "disabled")
         self.language_box.configure(state="disabled" if view.running or view.busy else "readonly")
+        self.target_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.input_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.output_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.endpoint_box.configure(state="disabled" if view.running or view.busy else "readonly")
@@ -819,7 +933,8 @@ class DesktopApp:
         self.asr_context_entry.configure(
             state="disabled" if view.running or view.busy or ASR_BACKENDS.get(self.asr_backend.get()) != "qwen" else "normal"
         )
-        self.switch_button.configure(state="disabled" if view.running or view.busy else "normal")
+        switch_unavailable = view.running or view.busy or self.source.get() == "tr"
+        self.switch_button.configure(state="disabled" if switch_unavailable else "normal")
 
     def _drain_events(self) -> None:
         if self._closing:
@@ -868,18 +983,31 @@ class DesktopApp:
             save_settings(replace(
                 self.settings,
                 source_language=self.source.get(),
+                target_language=next(code for code in SPEECH_LANGUAGES
+                                     if language_name(code) == self.target.get()),
                 input_device_id=self._selected_device(self.input_device.get(), self._input_devices),
                 output_device_id=self._selected_device(self.output_device.get(), self._output_devices),
                 endpoint_pause_ms=int(self.endpoint_pause.get().removesuffix(" ms")),
                 asr_backend=ASR_BACKENDS.get(self.asr_backend.get(), "sherpa"),
                 asr_context=self.asr_context.get(),
                 bubble_opacity=self.bubble_opacity.get(),
+                tts_voice_id=self.settings.tts_voice_id,
             ))
         except (OSError, ValueError, RuntimeError) as error:
             logger.warning("Could not save user settings: %s", error)
         if self.coordinator is not None:
-            self._worker = threading.Thread(target=self.coordinator.stop, name="desktop-session-close", daemon=True)
+            def shutdown() -> None:
+                try:
+                    self.coordinator.stop()
+                finally:
+                    if self.synthesizer is not None:
+                        self.synthesizer.unload()
+            self._worker = threading.Thread(target=shutdown, name="desktop-session-close", daemon=True)
             self._worker.start()
+        elif self.synthesizer is not None:
+            threading.Thread(target=self.synthesizer.unload, name="tts-close", daemon=True).start()
+        if self.voice_studio is not None:
+            self.voice_studio.close()
         self.root.destroy()
 
     def run(self) -> None:

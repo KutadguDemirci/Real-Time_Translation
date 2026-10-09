@@ -10,8 +10,8 @@ matrix when implementation begins.
 
 1. Detect OS, CPU architecture/core count, available memory, default input/output devices, and installed inference providers.
 2. Validate local assets and confirm the selected models can load.
-3. Use the shared device profile: PyTorch prefers CUDA, then Apple MPS, then CPU; ONNX Runtime prefers an available CUDA provider, then CoreML on macOS, then CPU.
-4. Report the chosen backend and fall back to CPU if accelerated model initialization fails.
+3. Use Apple MLX/Metal for Qwen3-TTS 0.6B Base 8-bit on Apple Silicon. PyTorch inference for translation and Qwen ASR prefers CUDA, then Apple MPS, then CPU. On Apple MPS, Qwen ASR uses eager grouped-query attention for compatibility with PyTorch 2.6. ONNX Runtime prefers an available CUDA provider, then CoreML on macOS, then CPU.
+4. Report the chosen backend. Qwen3-TTS requires Apple Silicon and fails with an actionable setup message on unsupported platforms.
 5. Give actionable guidance for unavailable microphones, speakers, permissions, and model files.
 
 Qwen3-ASR's native streaming adapter uses the optional vLLM backend where that runtime is
@@ -21,8 +21,9 @@ platforms usable without vLLM; this mode has no interim transcript during the ac
 ## macOS
 
 Request microphone permission through the desktop framework and explain how to enable it in
-System Settings. Use PyTorch MPS where supported and ONNX Runtime CoreML when its provider is
-available. CoreML can use Apple GPU or Neural Engine; unsupported model operators may run on CPU.
+System Settings. Use MLX/Metal for Qwen3-TTS and PyTorch MPS for supported ASR and translation
+models. Use ONNX Runtime CoreML when its provider is available. CoreML can use Apple GPU or Neural
+Engine; unsupported model operators may run on CPU.
 
 ## Windows
 

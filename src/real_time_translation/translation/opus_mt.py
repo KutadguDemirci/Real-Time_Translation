@@ -9,25 +9,31 @@ of the real-time STT -> translation -> TTS hot path.
 """
 
 import gc
+import logging
 from pathlib import Path
 import time
 from collections.abc import Mapping
 
 from ..device.probe import detect_device_profile
+from ..domain.languages import SUPPORTED_LANGUAGES
 from .base import TranslationResult
+
+logger = logging.getLogger(__name__)
 
 
 class OpusTranslator:
-    """
-    OPUS-MT translator for the currently supported language pairs.
+    """OPUS-MT translator using English as a pivot between non-English pairs.
 
     Models are loaded explicitly through load() and remain in memory
     until another language pair is loaded or unload() is called.
     """
 
     MODEL_NAMES = {
-        ("en", "fr"): "Helsinki-NLP/opus-mt-en-fr",
-        ("fr", "en"): "Helsinki-NLP/opus-mt-fr-en",
+        ("mul", "en"): "Helsinki-NLP/opus-mt-mul-en",
+        ("en", "mul"): "Helsinki-NLP/opus-mt-en-mul",
+    }
+    OPUS_LANGUAGE_IDS = {
+        "fr": "fra", "tr": "tur", "de": "deu", "es": "spa", "it": "ita", "zh": "zho",
     }
 
     def __init__(
@@ -66,6 +72,8 @@ class OpusTranslator:
 
         # Local path for the currently loaded model.
         self.model_name: str | None = None
+        self._loaded: dict[tuple[str, str], tuple[object, object, object]] = {}
+        self._active_pairs: tuple[tuple[str, str], ...] = ()
 
     def load(
         self,
@@ -79,82 +87,63 @@ class OpusTranslator:
         -------
         translator.load("en", "fr")
 
-        After this returns, the English -> French model is ready
-        for low-latency translation.
+        After this returns, the multilingual pivot model or models are ready.
         """
 
         source_lang = source_lang.lower().strip()
         target_lang = target_lang.lower().strip()
 
-        language_pair = (source_lang, target_lang)
+        if source_lang not in SUPPORTED_LANGUAGES or target_lang not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported translation direction: {source_lang}->{target_lang}.")
+        if source_lang == target_lang:
+            self.unload()
+            self.source_lang, self.target_lang = source_lang, target_lang
+            self._active_pairs = ()
+            self.model_name = "identity"
+            return
+        if source_lang == "en":
+            pairs = (("en", "mul"),)
+        elif target_lang == "en":
+            pairs = (("mul", "en"),)
+        else:
+            pairs = (("mul", "en"), ("en", "mul"))
+        if (source_lang, target_lang) == (self.source_lang, self.target_lang):
+            return
+        self.unload()
+        for pair in pairs:
+            self._load_pair(pair)
+        self._active_pairs = pairs
+        self.source_lang, self.target_lang = source_lang, target_lang
+        self.model_name = " → ".join(self.MODEL_NAMES[pair] for pair in pairs)
 
-        if language_pair not in self.MODEL_NAMES:
-            supported = ", ".join(
-                f"{src}->{tgt}"
-                for src, tgt in self.MODEL_NAMES
-            )
-
-            raise ValueError(
-                f"Unsupported translation direction: "
-                f"{source_lang}->{target_lang}. "
-                f"Supported directions: {supported}"
-            )
-
-        model_dir = self.model_dirs.get(language_pair)
+    def _load_pair(self, pair: tuple[str, str]) -> None:
+        model_dir = self.model_dirs.get(pair)
         if model_dir is None:
             raise FileNotFoundError(
-                f"No local OPUS-MT model is configured for {source_lang}->{target_lang}. "
-                "Download the pinned models with `python models/fetch_models.py` and "
-                "configure the local model directory. Network model loading is disabled."
+                f"No local OPUS-MT model is configured for {pair[0]}->{pair[1]}. "
+                "Run `python models/fetch_models.py` and `python models/fetch_translation_models.py` "
+                "to install the local translation models."
             )
         if not model_dir.is_dir():
             raise FileNotFoundError(f"Local translation model directory does not exist: {model_dir}")
-        model_name = str(model_dir)
-
-        # If the requested model is already loaded, do nothing.
-        if (
-            self.model is not None
-            and self.model_name == model_name
-        ):
-            return
-
-        # Remove any previously loaded model.
-        self.unload()
-
         try:
             import torch
             from transformers import MarianMTModel, MarianTokenizer
         except ImportError as error:
-            raise RuntimeError(
-                "Local OPUS-MT translation requires PyTorch and Transformers. "
-                "Install with `pip install -e .[translation]`."
-            ) from error
-
+            raise RuntimeError("Local OPUS-MT translation needs PyTorch and Transformers.") from error
         try:
-            self.tokenizer = MarianTokenizer.from_pretrained(
-                model_name, local_files_only=True
-            )
-            self.model = MarianMTModel.from_pretrained(
-                model_name, local_files_only=True
-            )
+            tokenizer = MarianTokenizer.from_pretrained(str(model_dir), local_files_only=True)
+            model = MarianMTModel.from_pretrained(str(model_dir), local_files_only=True)
+            model.to(self.device)
+            model.eval()
         except Exception as error:
             self.unload()
             raise RuntimeError(
-                f"Could not load the local OPUS-MT model for {source_lang}->{target_lang} "
-                f"from {model_dir}: {error}"
+                f"Could not load local OPUS-MT {pair[0]}->{pair[1]} from {model_dir}: {error}"
             ) from error
-
-        # Move model to selected device.
-        self.model.to(self.device)
-
-        # Disable training behaviour.
-        self.model.eval()
-        self._torch = torch
-
-        # Store the currently active configuration.
-        self.source_lang = source_lang
-        self.target_lang = target_lang
-        self.model_name = model_name
+        self._loaded[pair] = (tokenizer, model, torch)
+        self.model, self.tokenizer, self._torch = model, tokenizer, torch
+        logger.info("Loaded OPUS-MT %s->%s on %s", *pair, self.device)
 
     def translate(
         self,
@@ -166,15 +155,10 @@ class OpusTranslator:
         The model must have been loaded through load() first.
         """
 
-        if self.model is None or self.tokenizer is None:
+        if self.source_lang is None or self.target_lang is None:
             raise RuntimeError(
                 "No translation model is loaded. "
                 "Call load(source_lang, target_lang) first."
-            )
-
-        if self.source_lang is None or self.target_lang is None:
-            raise RuntimeError(
-                "Translation language pair is not configured."
             )
 
         if not text or not text.strip():
@@ -182,60 +166,36 @@ class OpusTranslator:
                 "Cannot translate empty text."
             )
 
-        # Tokenize input.
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        )
-
-        # Move tensors to the same device as the model.
-        inputs = {
-            key: value.to(self.device)
-            for key, value in inputs.items()
-        }
-
-        # Start timing the actual inference.
-        torch = self._torch
-        if torch is None:
-            raise RuntimeError("The local translation runtime is not initialized.")
-        if self.device.startswith("cuda"):
-            torch.cuda.synchronize()
-
-        start_time = time.perf_counter()
-
-        # No gradients are required for inference.
-        with torch.inference_mode():
-            generated_tokens = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                # The bundled generation config uses beam search. Greedy decoding is
-                # substantially cheaper on CPU and keeps turn-taking latency down.
-                num_beams=1,
-                do_sample=False,
-            )
-
-        # Make sure CUDA work has finished before stopping the timer.
-        if self.device.startswith("cuda"):
-            torch.cuda.synchronize()
-
-        end_time = time.perf_counter()
-
-        inference_time_ms = (
-            end_time - start_time
-        ) * 1000.0
-
-        # Convert generated tokens back into text.
-        translated_text = self.tokenizer.decode(
-            generated_tokens[0],
-            skip_special_tokens=True,
-        )
+        if not self._active_pairs:
+            return TranslationResult(text, 0.0, "identity", self.source_lang, self.target_lang)
+        inference_time_ms = 0.0
+        translated_text = text
+        for pair in self._active_pairs:
+            tokenizer, model, torch = self._loaded[pair]
+            step_text = translated_text
+            if pair == ("en", "mul"):
+                language_id = self.OPUS_LANGUAGE_IDS.get(self.target_lang or "")
+                if language_id is None:
+                    raise ValueError(f"OPUS-MT has no output language mapping for {self.target_lang!r}.")
+                step_text = f">>{language_id}<< {step_text}"
+            inputs = tokenizer(step_text, return_tensors="pt", padding=True, truncation=True)
+            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            if self.device.startswith("cuda"):
+                torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            with torch.inference_mode():
+                generated_tokens = model.generate(
+                    **inputs, max_new_tokens=self.max_new_tokens, num_beams=1, do_sample=False,
+                )
+            if self.device.startswith("cuda"):
+                torch.cuda.synchronize()
+            inference_time_ms += (time.perf_counter() - start_time) * 1000.0
+            translated_text = tokenizer.decode(generated_tokens[0], skip_special_tokens=True)
 
         return TranslationResult(
             text=translated_text,
             inference_time_ms=inference_time_ms,
-            model=self.model_name,
+            model=self.model_name or "OPUS-MT",
             source_lang=self.source_lang,
             target_lang=self.target_lang,
         )
@@ -250,6 +210,8 @@ class OpusTranslator:
         self.source_lang = None
         self.target_lang = None
         self.model_name = None
+        self._loaded.clear()
+        self._active_pairs = ()
 
         gc.collect()
 
