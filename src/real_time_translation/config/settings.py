@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -25,6 +26,7 @@ class Settings:
     cpu_threads: int | None = None
     model_profile: str = "auto"
     diagnostic_capture: bool = False
+    bubble_opacity: float = 0.6
 
 
 def default_config_dir() -> Path:
@@ -158,4 +160,11 @@ def _validate(name: str, value: Any) -> Any:
         if not isinstance(value, bool):
             raise ValueError("expected true or false")
         return value
+    if name == "bubble_opacity":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("expected a number between 0 and 1")
+        opacity = float(value)
+        if not math.isfinite(opacity) or not 0.0 <= opacity <= 1.0:
+            raise ValueError("expected a number between 0 and 1")
+        return opacity
     raise ValueError(f"unknown setting {name!r}")

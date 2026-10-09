@@ -10,7 +10,7 @@ version = "0.1.0"
 description = "Local French-English microphone translation with speech output"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6.0"]
+dependencies = ["PyYAML>=6.0", "Pillow>=10"]
 
 [project.optional-dependencies]
 # Piper is GPL-3.0-or-later; verify distribution obligations and each voice's separate license.
