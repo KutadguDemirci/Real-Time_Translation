@@ -210,6 +210,10 @@ class OpusTranslator:
             generated_tokens = self.model.generate(
                 **inputs,
                 max_new_tokens=self.max_new_tokens,
+                # The bundled generation config uses beam search. Greedy decoding is
+                # substantially cheaper on CPU and keeps turn-taking latency down.
+                num_beams=1,
+                do_sample=False,
             )
 
         # Make sure CUDA work has finished before stopping the timer.

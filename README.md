@@ -9,6 +9,7 @@ This repository is an implementation scaffold. The Python modules describe the r
 - The user chooses French or English as the spoken language. The target language is the other one.
 - Microphone audio is processed locally. Live ASR partials may be displayed, but are not translated or spoken until a phrase is committed.
 - A voice activity detector and endpointing policy commit a phrase after a configurable pause. The initial pause threshold is a tuning parameter, not a claim about achieved latency.
+- The desktop UI shows a per-phrase latency breakdown from microphone-frame backlog through ASR, translation, synthesis, and playback. Its end-of-speech wait defaults to 800 ms; longer waits help keep clauses together when speakers pause mid-sentence.
 - Translation and TTS run in order. Playback queues phrase audio so phrases do not overlap or reorder.
 - CPU inference is the required baseline. Hardware detection selects a compatible runtime profile; acceleration is optional and may fall back to CPU.
 - Raw audio is not persisted by default. Logs contain operational timings and errors, not audio or full transcripts unless the user explicitly enables diagnostic capture.

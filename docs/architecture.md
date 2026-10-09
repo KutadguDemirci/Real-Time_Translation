@@ -32,7 +32,7 @@ must be explicit: on overloaded queues, report status and avoid unbounded memory
 
 The streaming recognizer emits revisions. The UI may replace the current partial transcript.
 VAD silence plus a final ASR flush commits a source phrase exactly once. The initial configurable
-trailing-silence default is 600 ms; benchmark and tune it. Translate only committed source text,
+trailing-silence default is 800 ms; tune it in the desktop UI. Translate only committed source text,
 then synthesize and play it in order. Do not speak replaceable partial text.
 
 ## Device and runtime policy

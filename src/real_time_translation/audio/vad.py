@@ -25,17 +25,21 @@ class VoiceActivityDetector:
     recognizer should be flushed; it does not alter ASR text or perform a flush itself.
     """
 
-    def __init__(self, endpoint_pause_ms: int = 600, frame_ms: int = 20,
-                 threshold: float = 0.015, min_speech_ms: int = 40) -> None:
+    def __init__(self, endpoint_pause_ms: int = 800, frame_ms: int = 20,
+                 threshold: float = 0.015, release_ratio: float = 0.6,
+                 min_speech_ms: int = 40) -> None:
         if endpoint_pause_ms <= 0 or frame_ms <= 0:
             raise ValueError("endpoint_pause_ms and frame_ms must be positive.")
         if threshold < 0 or not math.isfinite(threshold):
             raise ValueError("threshold must be a finite non-negative RMS amplitude.")
+        if not 0 < release_ratio <= 1 or not math.isfinite(release_ratio):
+            raise ValueError("release_ratio must be finite and in the range (0, 1].")
         if min_speech_ms < 0:
             raise ValueError("min_speech_ms cannot be negative.")
         self.endpoint_pause_ms = endpoint_pause_ms
         self.frame_ms = frame_ms
         self.threshold = threshold
+        self.release_threshold = threshold * release_ratio
         self.min_speech_ms = min_speech_ms
         self._active = False
         self._speech_ms = 0
@@ -45,10 +49,16 @@ class VoiceActivityDetector:
     def active(self) -> bool:
         return self._active
 
+    @property
+    def trailing_silence_ms(self) -> int:
+        """Duration of the current quiet tail while a phrase is active."""
+        return self._silence_ms
+
     def process(self, samples: Any, sample_width: int = 4) -> VADResult:
         """Consume float32 samples (or signed 16-bit PCM bytes) for one frame."""
         rms = _rms(samples, sample_width)
-        speech = rms >= self.threshold
+        threshold = self.release_threshold if self._active else self.threshold
+        speech = rms >= threshold
         started = False
         ended = False
 

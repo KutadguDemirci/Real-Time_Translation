@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import queue
 import threading
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -79,16 +82,32 @@ class AudioCapture:
         sd, np = _audio_modules()
         self._closed.clear()
         blocksize = self.sample_rate * self.frame_ms // 1000
+        pending_samples = np.empty(0, dtype=np.float32)
         try:
             info = sd.query_devices(self.device, "input")
             native_rate = int(info["default_samplerate"])
             channels = min(2, int(info["max_input_channels"]))
             if channels < 1:
                 raise RuntimeError("The selected device has no input channels.")
-            sd.check_input_settings(device=self.device, channels=channels,
-                                    dtype="float32", samplerate=native_rate)
+            try:
+                # Capture directly at the recognizer rate where the device/host supports it.
+                sd.check_input_settings(device=self.device, channels=channels,
+                                        dtype="float32", samplerate=self.sample_rate)
+                stream_rate = self.sample_rate
+            except Exception:
+                stream_rate = native_rate
+                sd.check_input_settings(device=self.device, channels=channels,
+                                        dtype="float32", samplerate=stream_rate)
+            stream_blocksize = max(1, round(stream_rate * self.frame_ms / 1000))
+            logger.info(
+                "Microphone stream uses %d Hz in %d-sample blocks; ASR receives %d Hz frames.",
+                stream_rate,
+                stream_blocksize,
+                self.sample_rate,
+            )
 
             def callback(indata: Any, frames: int, timing: Any, status: Any) -> None:
+                nonlocal pending_samples
                 if self._closed.is_set():
                     raise sd.CallbackStop
                 if status:
@@ -96,13 +115,21 @@ class AudioCapture:
                         self._status = f"audio callback warning: {status}"
                 # The callback only averages channels, resamples and queues fixed frames.
                 mono = np.asarray(indata, dtype=np.float32).mean(axis=1)
-                if native_rate != self.sample_rate and mono.size:
-                    size = max(1, round(mono.size * self.sample_rate / native_rate))
-                    mono = np.interp(np.linspace(0, mono.size - 1, size),
-                                     np.arange(mono.size), mono).astype(np.float32)
-                for offset in range(0, mono.size - blocksize + 1, blocksize):
-                    frame = AudioFrame(mono[offset:offset + blocksize].copy(), self.sample_rate,
-                                       time.monotonic())
+                if stream_rate != self.sample_rate and mono.size:
+                    size = max(1, round(mono.size * self.sample_rate / stream_rate))
+                    positions = np.arange(size, dtype=np.float64) * stream_rate / self.sample_rate
+                    mono = np.interp(positions, np.arange(mono.size), mono).astype(np.float32)
+                queued_samples = (
+                    np.concatenate((pending_samples, mono))
+                    if pending_samples.size else mono
+                )
+                offset = 0
+                while offset + blocksize <= queued_samples.size:
+                    frame = AudioFrame(
+                        queued_samples[offset:offset + blocksize].copy(),
+                        self.sample_rate,
+                        time.monotonic(),
+                    )
                     try:
                         self.frames.put_nowait(frame)
                     except queue.Full:
@@ -115,9 +142,17 @@ class AudioCapture:
                             self.frames.put_nowait(frame)
                         except queue.Full:
                             self.dropped_frames += 1
+                    offset += blocksize
+                pending_samples = queued_samples[offset:].copy()
 
-            self._stream = sd.InputStream(device=self.device, samplerate=native_rate,
-                                          channels=channels, dtype="float32", callback=callback)
+            self._stream = sd.InputStream(
+                device=self.device,
+                samplerate=stream_rate,
+                blocksize=stream_blocksize,
+                channels=channels,
+                dtype="float32",
+                callback=callback,
+            )
             self._stream.start()
         except Exception as error:
             self._stream = None

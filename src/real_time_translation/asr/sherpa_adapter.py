@@ -113,7 +113,8 @@ class SherpaStreamingRecognizer:
                 sample_rate=self.sample_rate,
                 enable_endpoint_detection=False,
                 provider=provider,
-                decoding_method="greedy_search",
+                decoding_method="modified_beam_search",
+                max_active_paths=4,
             )
             self._stream = self._recognizer.create_stream()
         except Exception as error:
@@ -177,11 +178,22 @@ class SherpaStreamingRecognizer:
             self._recognizer.decode_stream(self._stream)
 
     def _reset_stream(self) -> None:
-        try:
-            if self._stream is not None and self._recognizer is not None:
-                self._recognizer.reset(self._stream)
-        finally:
-            self._last_text = ""
+        """Start a fresh decoder stream at every phrase boundary.
+
+        ``reset(stream)`` is provided by Sherpa for stream reuse, but replacing the stream
+        makes phrase isolation explicit: no encoder cache or predictor state from the prior
+        utterance can influence the next one. The recognizer/model stays loaded.
+        """
+        recognizer = self._recognizer
+        self._last_text = ""
+        if recognizer is not None and not self._closed:
+            try:
+                self._stream = recognizer.create_stream()
+            except Exception:
+                # Preserve the prior recovery behavior if this binding/model cannot allocate
+                # another stream, while surfacing the problem on the next decode if needed.
+                if self._stream is not None:
+                    recognizer.reset(self._stream)
 
     def _update_if_changed(
         self, text: str, timestamp: float, *, is_final: bool

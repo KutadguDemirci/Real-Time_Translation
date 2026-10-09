@@ -101,6 +101,23 @@ class SynthesizedAudio:
 
 
 @dataclass(frozen=True, slots=True)
+class LatencyRecorded:
+    """One measured processing or endpoint delay associated with a committed phrase."""
+
+    phrase_id: str
+    stage: str
+    duration_ms: float
+    recorded_at: float
+
+    def __post_init__(self) -> None:
+        _validate_phrase_id(self.phrase_id)
+        if not self.stage.strip():
+            raise ValueError("latency stage must not be empty")
+        _duration(self.duration_ms)
+        _timestamp(self.recorded_at)
+
+
+@dataclass(frozen=True, slots=True)
 class StatusChanged:
     status: SessionStatus
     message: str
@@ -141,6 +158,7 @@ DomainEvent: TypeAlias = (
     | PhraseCommitted
     | TranslationCompleted
     | SynthesizedAudio
+    | LatencyRecorded
     | StatusChanged
     | RecoverableError
     | ShutdownRequested

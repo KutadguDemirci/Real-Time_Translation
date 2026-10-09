@@ -19,7 +19,7 @@ class Settings:
     source_language: str = "en"
     input_device_id: int | None = None
     output_device_id: int | None = None
-    endpoint_pause_ms: int = 600
+    endpoint_pause_ms: int = 800
     cpu_threads: int | None = None
     model_profile: str = "auto"
     diagnostic_capture: bool = False

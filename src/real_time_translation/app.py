@@ -172,13 +172,13 @@ def main() -> int:
     try:
         coordinator_factory = None
         if state.manifest is not None:
-            coordinator_factory = lambda source, emit: create_coordinator(
+            coordinator_factory = lambda source, emit, settings: create_coordinator(
                 source,
                 emit,
                 resolver=resolver,
                 manifest=state.manifest,
                 device=profile,
-                settings=state.settings,
+                settings=settings,
             )
         run_desktop(
             model_status=state.model_status,

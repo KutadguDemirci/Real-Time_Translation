@@ -7,6 +7,8 @@ direction-specific pipeline; domain events cross onto the Tk thread through a bo
 from __future__ import annotations
 
 from collections.abc import Callable
+import ctypes
+from dataclasses import replace
 import logging
 import queue
 import threading
@@ -18,14 +20,21 @@ from real_time_translation.audio.capture import AudioCapture
 from real_time_translation.audio.playback import AudioPlayback
 from real_time_translation.config import Settings, save_settings
 from real_time_translation.domain.events import (
-    DomainEvent, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
+    DomainEvent, LatencyRecorded, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
     SynthesizedAudio, TranscriptUpdated, TranslationCompleted,
 )
 from real_time_translation.domain.languages import target_for
 from real_time_translation.ui.view_state import language_name, session_view_state
 
 logger = logging.getLogger(__name__)
-CoordinatorFactory = Callable[[str, Callable[[DomainEvent], None]], Any]
+CoordinatorFactory = Callable[[str, Callable[[DomainEvent], None], Settings], Any]
+
+LATENCY_STAGES = (
+    "Audio backlog", "VAD compute", "Endpoint silence", "Streaming ASR",
+    "ASR flush", "Phrase commit", "Phrase queue", "MT inference", "MT total",
+    "TTS inference", "TTS total", "Playback enqueue", "Playback queue",
+    "Speech → playback", "Playback duration",
+)
 
 
 class DesktopApp:
@@ -41,7 +50,10 @@ class DesktopApp:
         device_label: str = "CPU",
         settings: Settings | None = None,
     ) -> None:
-        self.root = root or tk.Tk()
+        if root is None:
+            _enable_dpi_awareness()
+            root = tk.Tk()
+        self.root = root
         self.coordinator_factory = coordinator_factory
         self.model_status = model_status
         self.device_label = device_label
@@ -55,6 +67,12 @@ class DesktopApp:
         self.status_detail = tk.StringVar(value="Choose a language and start listening.")
         self.input_device = tk.StringVar(value="Default microphone")
         self.output_device = tk.StringVar(value="Default speakers")
+        self.endpoint_pause = tk.StringVar(value=f"{self.settings.endpoint_pause_ms} ms")
+        self._latest_phrase_id: str | None = None
+        self._active_latency_phrase_id: str | None = None
+        self._phrase_latencies: dict[str, dict[str, float]] = {}
+        self._phrase_order: list[str] = []
+        self.latency_values = {stage: tk.StringVar(value="—") for stage in LATENCY_STAGES}
         self.error_text = tk.StringVar(value=setup_error)
         self._input_devices: list[Any] = []
         self._output_devices: list[dict[str, Any]] = []
@@ -67,8 +85,8 @@ class DesktopApp:
 
     def _build(self) -> None:
         self.root.title("Local Translator")
-        self.root.geometry("900x720")
-        self.root.minsize(680, 600)
+        self.root.geometry("1080x940")
+        self.root.minsize(900, 760)
         self.root.configure(bg="#f4f6f3")
 
         style = ttk.Style(self.root)
@@ -90,14 +108,24 @@ class DesktopApp:
                         font=("Segoe UI", 9))
         style.configure("Status.TLabel", background="#e3f2e9", foreground="#1f6a43",
                         font=("Segoe UI", 10, "bold"), padding=(11, 6))
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=(18, 10))
-        style.configure("TButton", font=("Segoe UI", 9), padding=(10, 7))
-        style.configure("TCombobox", padding=5)
+        style.configure("Primary.TButton", font=("Segoe UI", 11, "bold"), padding=(20, 12),
+                        background="#168052", foreground="#ffffff", borderwidth=0, focusthickness=0)
+        style.map("Primary.TButton", background=[("disabled", "#a9caba"),
+                                                   ("pressed", "#0c603b"), ("active", "#116b43")])
+        style.configure("Secondary.TButton", font=("Segoe UI", 10, "bold"), padding=(15, 9),
+                        background="#e7f2eb", foreground="#205b3b", borderwidth=0, focusthickness=0)
+        style.map("Secondary.TButton", background=[("pressed", "#d4e9dc"), ("active", "#dcefe3")])
+        style.configure("Stop.TButton", font=("Segoe UI", 10, "bold"), padding=(15, 9),
+                        background="#fae8e6", foreground="#9d3931", borderwidth=0, focusthickness=0)
+        style.map("Stop.TButton", background=[("pressed", "#f3d4d1"), ("active", "#f7ddda")])
+        style.configure("TButton", font=("Segoe UI", 10), padding=(13, 9), borderwidth=0)
+        style.map("TButton", background=[("pressed", "#e2eae5"), ("active", "#eef3ef")])
+        style.configure("TCombobox", padding=8, fieldbackground="#ffffff", background="#ffffff")
 
-        shell = ttk.Frame(self.root, style="App.TFrame", padding=(34, 25, 34, 22))
+        shell = ttk.Frame(self.root, style="App.TFrame", padding=(30, 22, 30, 18))
         shell.pack(fill="both", expand=True)
         header = ttk.Frame(shell, style="App.TFrame")
-        header.pack(fill="x", pady=(0, 20))
+        header.pack(fill="x", pady=(0, 15))
         ttk.Label(header, text="LOCAL · PRIVATE · LIVE", style="Eyebrow.TLabel").pack(anchor="w")
         ttk.Label(header, text="Say it. Understand it.", style="Title.TLabel").pack(anchor="w", pady=(5, 3))
         ttk.Label(header, text="Real-time French ↔ English translation, processed on this device.",
@@ -116,23 +144,59 @@ class DesktopApp:
         self.direction = ttk.Label(setup, text="English  →  French", style="CardTitle.TLabel")
         self.direction.grid(row=1, column=1, sticky="w", padx=8, pady=(6, 0))
         ttk.Label(setup, text="OUTPUT LANGUAGE", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=8)
-        ttk.Button(setup, text="⇄  Switch", command=self._switch_language).grid(
+        self.switch_button = ttk.Button(setup, text="⇄  Switch", style="Secondary.TButton",
+                                        command=self._switch_language)
+        self.switch_button.grid(
             row=1, column=2, sticky="e", pady=(6, 0))
 
         devices = ttk.Frame(shell, style="Card.TFrame", padding=18)
         devices.pack(fill="x", pady=(0, 14))
-        devices.columnconfigure(0, weight=1)
-        devices.columnconfigure(1, weight=1)
+        for column in range(3):
+            devices.columnconfigure(column, weight=1)
         ttk.Label(devices, text="AUDIO DEVICES", style="Muted.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, 7))
         ttk.Button(devices, text="Refresh", command=self._refresh_devices).grid(
-            row=0, column=1, sticky="e", pady=(0, 7))
+            row=0, column=2, sticky="e", pady=(0, 7))
         ttk.Label(devices, text="Microphone", style="Muted.TLabel").grid(row=1, column=0, sticky="w")
         ttk.Label(devices, text="Speakers", style="Muted.TLabel").grid(row=1, column=1, sticky="w")
+        ttk.Label(devices, text="END OF SPEECH WAIT", style="Muted.TLabel").grid(row=1, column=2, sticky="w")
         self.input_box = ttk.Combobox(devices, textvariable=self.input_device, state="readonly")
         self.output_box = ttk.Combobox(devices, textvariable=self.output_device, state="readonly")
+        pauses = [
+            "200 ms", "300 ms", "400 ms", "500 ms", "600 ms", "800 ms",
+            "1000 ms", "1500 ms", "2000 ms", "3000 ms",
+        ]
+        saved_pause = self.endpoint_pause.get()
+        try:
+            saved_pause_ms = int(saved_pause.removesuffix(" ms"))
+        except ValueError:
+            saved_pause_ms = 800
+        if not 100 <= saved_pause_ms <= 5000:
+            saved_pause = "800 ms"
+            self.endpoint_pause.set(saved_pause)
+        if saved_pause not in pauses:
+            pauses.append(saved_pause)
+        self.endpoint_box = ttk.Combobox(devices, textvariable=self.endpoint_pause, state="readonly",
+                                         values=pauses, width=12)
+        ttk.Label(devices, text="Shorter is quicker; longer helps keep sentences together.", style="Muted.TLabel").grid(
+            row=3, column=2, sticky="w", padx=(12, 0), pady=(5, 0))
         self.input_box.grid(row=2, column=0, sticky="ew", padx=(0, 12), pady=(5, 0))
-        self.output_box.grid(row=2, column=1, sticky="ew", padx=(12, 0), pady=(5, 0))
+        self.output_box.grid(row=2, column=1, sticky="ew", padx=12, pady=(5, 0))
+        self.endpoint_box.grid(row=2, column=2, sticky="ew", padx=(12, 0), pady=(5, 0))
+
+        latency = ttk.Frame(shell, style="Card.TFrame", padding=(16, 12))
+        latency.pack(fill="x", pady=(0, 14))
+        ttk.Label(latency, text="LATENCY · PHRASE BEING PROCESSED", style="Muted.TLabel").grid(
+            row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
+        for index, stage in enumerate(LATENCY_STAGES):
+            block, row = divmod(index, 5)
+            label_column = block * 2
+            ttk.Label(latency, text=stage, style="Muted.TLabel").grid(
+                row=row + 1, column=label_column, sticky="w", padx=(0, 8), pady=2)
+            ttk.Label(latency, textvariable=self.latency_values[stage], style="CardTitle.TLabel").grid(
+                row=row + 1, column=label_column + 1, sticky="e", padx=(0, 18), pady=2)
+        for column in (0, 2, 4):
+            latency.columnconfigure(column, weight=1)
 
         transcript_row = ttk.Frame(shell, style="App.TFrame")
         transcript_row.pack(fill="both", expand=True, pady=(0, 14))
@@ -151,7 +215,8 @@ class DesktopApp:
         self.start_button = ttk.Button(footer, text="Start listening", style="Primary.TButton",
                                        command=self.start)
         self.start_button.pack(side="right", padx=(8, 0))
-        self.stop_button = ttk.Button(footer, text="Stop", command=self.stop, state="disabled")
+        self.stop_button = ttk.Button(footer, text="Stop", style="Stop.TButton",
+                                      command=self.stop, state="disabled")
         self.stop_button.pack(side="right")
 
         meta = ttk.Frame(shell, style="App.TFrame")
@@ -248,13 +313,24 @@ class DesktopApp:
         source_language = self.source.get()
         input_id = self._selected_device(self.input_device.get(), self._input_devices)
         output_id = self._selected_device(self.output_device.get(), self._output_devices)
+        try:
+            endpoint_pause_ms = int(self.endpoint_pause.get().removesuffix(" ms"))
+            session_settings = replace(
+                self.settings,
+                source_language=source_language,
+                input_device_id=input_id,
+                output_device_id=output_id,
+                endpoint_pause_ms=endpoint_pause_ms,
+            )
+        except (TypeError, ValueError) as error:
+            self.error_text.set(f"Invalid end-of-speech wait: {error}")
+            self._set_status(SessionStatus.ERROR, "Check the session settings")
+            return
 
         def launch() -> None:
             try:
-                coordinator = self.coordinator_factory(source_language, self._emit_event)
+                coordinator = self.coordinator_factory(source_language, self._emit_event, session_settings)
                 self.coordinator = coordinator
-                coordinator.capture.device = input_id
-                coordinator.playback.device = output_id
                 coordinator.start()
             except Exception as error:
                 self._emit_event(RecoverableError("startup", str(error), 0.0))
@@ -287,6 +363,8 @@ class DesktopApp:
         self.language_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.input_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.output_box.configure(state="disabled" if view.running or view.busy else "readonly")
+        self.endpoint_box.configure(state="disabled" if view.running or view.busy else "readonly")
+        self.switch_button.configure(state="disabled" if view.running or view.busy else "normal")
 
     def _drain_events(self) -> None:
         if self._closing:
@@ -301,10 +379,28 @@ class DesktopApp:
             elif isinstance(event, TranscriptUpdated):
                 self._set_text(self.source_card, event.segment.text or "Listening…")
             elif isinstance(event, PhraseCommitted):
+                phrase_id = event.phrase.phrase_id
+                self._latest_phrase_id = phrase_id
+                self._phrase_latencies[phrase_id] = {}
+                self._phrase_order.append(phrase_id)
+                while len(self._phrase_order) > 20:
+                    expired = self._phrase_order.pop(0)
+                    self._phrase_latencies.pop(expired, None)
                 self._set_text(self.source_card, event.phrase.text)
                 self._set_text(self.target_card, "Translating…")
+            elif isinstance(event, LatencyRecorded):
+                if event.stage not in self.latency_values:
+                    continue
+                phrase_metrics = self._phrase_latencies.setdefault(event.phrase_id, {})
+                phrase_metrics[event.stage] = event.duration_ms
+                if event.stage == "Phrase queue":
+                    self._active_latency_phrase_id = event.phrase_id
+                    self._show_latency_metrics(phrase_metrics)
+                elif event.phrase_id == self._active_latency_phrase_id:
+                    self.latency_values[event.stage].set(_format_duration(event.duration_ms))
             elif isinstance(event, TranslationCompleted):
-                self._set_text(self.target_card, event.text)
+                if event.phrase_id == self._latest_phrase_id:
+                    self._set_text(self.target_card, event.text)
             elif isinstance(event, SynthesizedAudio):
                 self.status_detail.set(f"Speaking in {language_name(event.target_language)}")
             elif isinstance(event, RecoverableError):
@@ -312,17 +408,20 @@ class DesktopApp:
                 logger.warning("%s: %s", event.component, event.message)
         self.root.after(80, self._drain_events)
 
+    def _show_latency_metrics(self, metrics: dict[str, float]) -> None:
+        for stage, value in self.latency_values.items():
+            duration = metrics.get(stage)
+            value.set(_format_duration(duration) if duration is not None else "—")
+
     def close(self) -> None:
         self._closing = True
         try:
-            save_settings(Settings(
+            save_settings(replace(
+                self.settings,
                 source_language=self.source.get(),
                 input_device_id=self._selected_device(self.input_device.get(), self._input_devices),
                 output_device_id=self._selected_device(self.output_device.get(), self._output_devices),
-                endpoint_pause_ms=self.settings.endpoint_pause_ms,
-                cpu_threads=self.settings.cpu_threads,
-                model_profile=self.settings.model_profile,
-                diagnostic_capture=self.settings.diagnostic_capture,
+                endpoint_pause_ms=int(self.endpoint_pause.get().removesuffix(" ms")),
             ))
         except (OSError, ValueError, RuntimeError) as error:
             logger.warning("Could not save user settings: %s", error)
@@ -339,3 +438,31 @@ class DesktopApp:
 def run_desktop(**kwargs: Any) -> None:
     """Create and run the desktop translation window."""
     DesktopApp(**kwargs).run()
+
+
+def _enable_dpi_awareness() -> None:
+    """Ask Windows to scale the window and text crisply on high-DPI displays."""
+    if not hasattr(ctypes, "windll"):
+        return
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        logger.debug("Windows DPI awareness could not be enabled", exc_info=True)
+
+
+def _format_duration(duration_ms: float) -> str:
+    if duration_ms >= 1000.0:
+        return f"{duration_ms / 1000.0:.2f} s"
+    if duration_ms < 10.0:
+        return f"{duration_ms:.1f} ms"
+    return f"{duration_ms:.0f} ms"

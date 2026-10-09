@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import queue
 import threading
-from typing import Any
+import time
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -14,6 +18,7 @@ class PlaybackItem:
     sample_rate: int
     channels: int = 1
     sample_width: int = 2
+    phrase_id: str | None = None
 
 
 class AudioPlayback:
@@ -29,6 +34,8 @@ class AudioPlayback:
         self._muted = False
         self._closed = False
         self.last_error: str | None = None
+        self.on_playback_started: Callable[[str | None, float], None] | None = None
+        self.on_playback_finished: Callable[[str | None, float], None] | None = None
 
     @staticmethod
     def enumerate_devices() -> list[dict[str, Any]]:
@@ -44,7 +51,8 @@ class AudioPlayback:
             raise RuntimeError(f"Could not enumerate speaker devices: {error}") from error
 
     def enqueue(self, pcm: bytes | Any, sample_rate: int, channels: int = 1,
-                sample_width: int = 2, timeout: float | None = None) -> None:
+                sample_width: int = 2, timeout: float | None = None,
+                phrase_id: str | None = None) -> None:
         """Queue one phrase; block up to ``timeout`` when the bounded queue is full."""
         if sample_rate <= 0 or channels < 1 or sample_width != 2:
             raise ValueError("Playback requires a positive sample rate and signed 16-bit PCM.")
@@ -59,12 +67,16 @@ class AudioPlayback:
             if self._closed:
                 raise RuntimeError("Playback is closed.")
             self._ensure_worker()
-        self._queue.put(PlaybackItem(payload, sample_rate, channels, sample_width), timeout=timeout)
+        self._queue.put(
+            PlaybackItem(payload, sample_rate, channels, sample_width, phrase_id),
+            timeout=timeout,
+        )
 
-    def play(self, result: Any, timeout: float | None = None) -> None:
+    def play(self, result: Any, timeout: float | None = None,
+             phrase_id: str | None = None) -> None:
         """Enqueue a ``SpeechResult`` without requiring callers to unpack its metadata."""
         self.enqueue(result.pcm, result.sample_rate, result.channels,
-                     result.sample_width, timeout=timeout)
+                     result.sample_width, timeout=timeout, phrase_id=phrase_id)
 
     def set_muted(self, muted: bool) -> None:
         with self._lock:
@@ -138,7 +150,22 @@ class AudioPlayback:
                     samples = samples[:, :output_channels]
                 elif samples.ndim == 2 and samples.shape[1] < output_channels:
                     samples = np.repeat(samples[:, :1], output_channels, axis=1)
-                sd.play(samples, samplerate=output_rate, device=self.device, blocking=True)
+                # Schedule output first so failures are reported before we mark the phrase
+                # as started. Waiting separately keeps this worker's queue strictly ordered.
+                sd.play(samples, samplerate=output_rate, device=self.device, blocking=False)
+                callback = self.on_playback_started
+                if callback is not None:
+                    try:
+                        callback(item.phrase_id, time.monotonic())
+                    except Exception:
+                        logger.exception("Playback start callback failed")
+                sd.wait()
+                callback = self.on_playback_finished
+                if callback is not None:
+                    try:
+                        callback(item.phrase_id, time.monotonic())
+                    except Exception:
+                        logger.exception("Playback completion callback failed")
                 self.last_error = None
             except Exception as error:
                 self.last_error = (
