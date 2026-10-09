@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from collections import deque
 import logging
 import queue
 import threading
@@ -58,6 +59,11 @@ class SessionCoordinator:
         self.capture = capture
         self.vad = vad
         self.recognizer = recognizer
+        self._listening_detail = (
+            "Listening · transcript appears after each phrase"
+            if getattr(recognizer, "mode", "streaming") == "phrase"
+            else "Listening"
+        )
         self.translator = translator
         self.synthesizer = synthesizer
         self.playback = playback
@@ -75,6 +81,9 @@ class SessionCoordinator:
         self._audio_thread: threading.Thread | None = None
         self._phrase_thread: threading.Thread | None = None
         self._active_latency: dict[str, float] | None = None
+        preroll_frames = max(1, round(100 / max(1, self.vad.frame_ms)))
+        self._speech_preroll: deque[AudioFrame] = deque(maxlen=preroll_frames)
+        self._active_phrase_started_at: float | None = None
         self._last_speech_at: float | None = None
         self._phrase_speech_end: dict[str, float | None] = {}
         self._phrase_queued_at: dict[str, float] = {}
@@ -116,7 +125,7 @@ class SessionCoordinator:
             )
             self._phrase_thread.start()
             self._audio_thread.start()
-            self._set_status(SessionStatus.LISTENING, "Listening")
+            self._set_status(SessionStatus.LISTENING, self._listening_detail)
         except Exception as error:
             self._stop.set()
             self._cleanup_devices()
@@ -138,7 +147,7 @@ class SessionCoordinator:
         try:
             update = self.recognizer.finish(current)
             if update is not None:
-                self._publish_update(update)
+                self._publish_update(update, self._active_phrase_started_at)
         except Exception as error:
             self._error("asr", f"Could not finalize the active phrase: {error}")
         finally:
@@ -155,6 +164,7 @@ class SessionCoordinator:
                 self._publish_phrase(phrase, metrics, self._last_speech_at)
             else:
                 self._active_latency = None
+            self._active_phrase_started_at = None
         except Exception as error:
             self._error("asr", f"Could not commit the active phrase: {error}")
         self._queue_sentinel(timeout)
@@ -188,23 +198,40 @@ class SessionCoordinator:
                 max(0.0, (time.monotonic() - frame.captured_at) * 1000.0),
             )
             self._active_latency["VAD compute"] += vad_ms
-        asr_started = time.perf_counter()
-        try:
-            update = self.recognizer.accept_audio(frame.samples, frame.sample_rate, frame.captured_at)
-            if update is not None:
-                self._publish_update(update)
-        except Exception as error:
-            self._error("asr", str(error))
-        finally:
-            if self._active_latency is not None:
-                self._active_latency["Streaming ASR"] += (time.perf_counter() - asr_started) * 1000.0
+        if result.started:
+            # Preserve a short onset window so the VAD's minimum-speech delay cannot clip
+            # the first phoneme. Idle audio is not sent to the recognizer or retained longer.
+            asr_frames = [*self._speech_preroll, frame]
+            self._speech_preroll.clear()
+            self._active_phrase_started_at = asr_frames[0].captured_at
+        elif result.speech:
+            asr_frames = [frame]
+        else:
+            self._speech_preroll.append(frame)
+            asr_frames = []
+
+        if asr_frames:
+            asr_started = time.perf_counter()
+            try:
+                for asr_frame in asr_frames:
+                    update = self.recognizer.accept_audio(
+                        asr_frame.samples, asr_frame.sample_rate, asr_frame.captured_at
+                    )
+                    if update is not None:
+                        self._publish_update(update, self._active_phrase_started_at)
+            except Exception as error:
+                self._error("asr", str(error))
+            finally:
+                if self._active_latency is not None:
+                    self._active_latency["Streaming ASR"] += (time.perf_counter() - asr_started) * 1000.0
         if result.ended:
+            self._speech_preroll.clear()
             endpoint = frame.captured_at
             flush_started = time.perf_counter()
             try:
                 update = self.recognizer.finish(endpoint)
                 if update is not None:
-                    self._publish_update(update)
+                    self._publish_update(update, self._active_phrase_started_at)
             except Exception as error:
                 self._error("asr", f"Could not finalize phrase: {error}")
             flush_ms = (time.perf_counter() - flush_started) * 1000.0
@@ -220,7 +247,8 @@ class SessionCoordinator:
                 self._set_status(SessionStatus.PROCESSING, "Translating committed phrase")
             else:
                 self._active_latency = None
-                self._set_status(SessionStatus.LISTENING, "Listening")
+                self._set_status(SessionStatus.LISTENING, self._listening_detail)
+            self._active_phrase_started_at = None
 
     def _audio_loop(self) -> None:
         while not self._stop.is_set():
@@ -309,14 +337,14 @@ class SessionCoordinator:
                     self._record_latency(phrase.phrase_id, "Speech → playback", max(0.0, (playback_started - speech_end_at) * 1000.0))
                 self._phrase_speech_end.pop(phrase.phrase_id, None)
             self.timing.mark(phrase.phrase_id, "playback_enqueued")
-            self._set_status(SessionStatus.LISTENING, "Listening")
+            self._set_status(SessionStatus.LISTENING, self._listening_detail)
         except Exception as error:
             self._error("translation_pipeline", str(error), phrase.phrase_id)
             self._set_status(SessionStatus.LISTENING, "Listening after a phrase error")
 
-    def _publish_update(self, update: Any) -> None:
+    def _publish_update(self, update: Any, started_at: float | None = None) -> None:
         try:
-            segment = self.committer.observe(update)
+            segment = self.committer.observe(update, started_at=started_at)
         except (TypeError, ValueError) as error:
             self._error("asr", f"Invalid recognizer update: {error}")
             return

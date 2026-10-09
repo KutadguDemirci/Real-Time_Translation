@@ -12,6 +12,20 @@ and French streaming ASR models, both OPUS-MT translation directions, and medium
 `models/local/`, then writes `models/local/manifest.yaml` with SHA-256 checksums. The model files
 are ignored by Git. The downloader is explicit and separate from normal application startup.
 
+To add the optional Qwen3-ASR 0.6B model, install Qwen support and run
+`python models/fetch_qwen_asr.py`. This downloads the official checkpoint, records its exact
+revision and per-file hashes, and preserves the other manifest entries. The standard starter-set
+command does not download Qwen weights.
+
+```powershell
+pip install -e ".[qwen-asr]"
+python models/fetch_qwen_asr.py
+```
+
+On Linux, install `pip install -e ".[qwen-asr-streaming]"` to use Qwen's native vLLM partial
+transcripts when the installed vLLM build supports your hardware. The standard Qwen extra uses
+phrase-final Transformers transcription, which is the path used on Windows and macOS.
+
 On Windows, point the app at this directory in the same PowerShell session before launching it:
 
 ```powershell
@@ -57,11 +71,16 @@ print(asr.files)
 Use `load_manifest(path)` and `validate_manifest(manifest, directory)` when the application
 needs to display all diagnostics without raising an exception.
 
-The current streaming ASR adapter supports Sherpa-ONNX transducer models. The model directory
-must contain one `tokens.txt`, one encoder ONNX file, one decoder ONNX file, and one joiner ONNX
-file. Use `TransducerModel.discover()` to find common filenames, or pass explicit paths when
-constructing `SherpaStreamingRecognizer`. Install the runtime with `pip install -e .[inference]`.
-Audio passed to the recognizer must be mono, normalized float samples at 16 kHz. Feed each frame
-to `accept_audio`; call `finish` at the VAD endpoint to get the final utterance and reset for the
-next phrase.
+The Sherpa-ONNX streaming adapter uses one `tokens.txt`, one encoder ONNX file, one decoder ONNX
+file, and one joiner ONNX file. Use `TransducerModel.discover()` to find common filenames, or pass
+explicit paths when constructing `SherpaStreamingRecognizer`. Install it with
+`pip install -e .[inference]`.
+
+Qwen3-ASR uses the same mono, normalized 16 kHz audio and VAD phrase boundaries. Select the engine
+in the app and optionally enter names or specialist terms as Qwen context. On Linux with the
+optional vLLM runtime installed, Qwen emits revised partial hypotheses during speech and
+finalizes at the VAD endpoint. On Windows and macOS, it retains the complete phrase and transcribes
+it at the endpoint with Transformers, so interim text is unavailable. Install its model runtime
+with `pip install -e .[qwen-asr]`. The Qwen asset is optional and is validated only when selected;
+runtime loading uses the verified local files and makes no network requests.
 

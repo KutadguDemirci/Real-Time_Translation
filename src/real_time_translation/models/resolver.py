@@ -46,7 +46,9 @@ class ModelResolver:
     def load(self) -> ModelManifest:
         """Parse the configured manifest and validate all referenced files and hashes."""
         manifest = load_manifest(self.manifest_path)
-        problems = validate_manifest(manifest, self.model_dir)
+        # Optional backends (for example Qwen ASR) need not be installed unless selected.
+        # resolve() validates the selected optional asset in full before it is loaded.
+        problems = validate_manifest(manifest, self.model_dir, include_optional=False)
         if problems:
             raise ModelValidationError(problems, self.model_dir, self.manifest_path)
         return manifest

@@ -8,6 +8,7 @@ licenses. Keep copies of license texts and attribution requirements with release
 |---|---|---|---|---|---|---|
 | English streaming ASR | Sherpa-ONNX-compatible English model | TBD | Verify runtime | Verify model card | Verify | Pending |
 | French streaming ASR | Sherpa-ONNX-compatible French model | TBD | Verify runtime | Verify model card | Verify | Pending |
+| English/French ASR | Qwen/Qwen3-ASR-0.6B (optional) | Resolved by `models/fetch_qwen_asr.py` | Apache-2.0 package | Apache-2.0 model card | Preserve Qwen attribution and license | Candidate |
 | EN→FR translation | Helsinki-NLP OPUS-MT | TBD | Apache-2.0 listing | Apache-2.0 listing | Preserve notices; verify exact revision | Candidate |
 | FR→EN translation | Helsinki-NLP OPUS-MT | TBD | Apache-2.0 listing | Apache-2.0 listing | Preserve notices; verify exact revision | Candidate |
 | Piper runtime | OHF-Voice/piper1-gpl | 1.8.0 API candidate | GPL-3.0-or-later | N/A | Review distribution obligations | Candidate |

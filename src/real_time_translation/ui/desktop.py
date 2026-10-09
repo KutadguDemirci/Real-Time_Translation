@@ -35,6 +35,7 @@ LATENCY_STAGES = (
     "TTS inference", "TTS total", "Playback enqueue", "Playback queue",
     "Speech → playback", "Playback duration",
 )
+ASR_BACKENDS = {"Sherpa-ONNX": "sherpa", "Qwen3-ASR": "qwen"}
 
 
 class DesktopApp:
@@ -68,6 +69,8 @@ class DesktopApp:
         self.input_device = tk.StringVar(value="Default microphone")
         self.output_device = tk.StringVar(value="Default speakers")
         self.endpoint_pause = tk.StringVar(value=f"{self.settings.endpoint_pause_ms} ms")
+        self.asr_backend = tk.StringVar(value=_asr_backend_label(self.settings.asr_backend))
+        self.asr_context = tk.StringVar(value=self.settings.asr_context)
         self._latest_phrase_id: str | None = None
         self._active_latency_phrase_id: str | None = None
         self._phrase_latencies: dict[str, dict[str, float]] = {}
@@ -77,6 +80,7 @@ class DesktopApp:
         self._input_devices: list[Any] = []
         self._output_devices: list[dict[str, Any]] = []
         self._build()
+        self._asr_backend_changed()
         self._refresh_devices(silent=True)
         self._select_saved_device(self.input_device, self._input_devices, self.settings.input_device_id)
         self._select_saved_device(self.output_device, self._output_devices, self.settings.output_device_id)
@@ -136,6 +140,7 @@ class DesktopApp:
         setup.columnconfigure(0, weight=1)
         setup.columnconfigure(1, weight=1)
         setup.columnconfigure(2, weight=1)
+        setup.columnconfigure(3, weight=1)
         ttk.Label(setup, text="I’m speaking", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
         self.language_box = ttk.Combobox(setup, textvariable=self.source, state="readonly",
                                          values=("en", "fr"), width=18)
@@ -144,10 +149,21 @@ class DesktopApp:
         self.direction = ttk.Label(setup, text="English  →  French", style="CardTitle.TLabel")
         self.direction.grid(row=1, column=1, sticky="w", padx=8, pady=(6, 0))
         ttk.Label(setup, text="OUTPUT LANGUAGE", style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Label(setup, text="ASR ENGINE", style="Muted.TLabel").grid(row=0, column=2, sticky="w", padx=8)
+        self.asr_box = ttk.Combobox(setup, textvariable=self.asr_backend, state="readonly",
+                                    values=tuple(ASR_BACKENDS), width=18)
+        self.asr_box.grid(row=1, column=2, sticky="ew", padx=8, pady=(6, 0))
+        self.asr_box.bind("<<ComboboxSelected>>", self._asr_backend_changed)
         self.switch_button = ttk.Button(setup, text="⇄  Switch", style="Secondary.TButton",
                                         command=self._switch_language)
         self.switch_button.grid(
-            row=1, column=2, sticky="e", pady=(6, 0))
+            row=1, column=3, sticky="e", pady=(6, 0))
+        ttk.Label(setup, text="QWEN VOCABULARY / CONTEXT (OPTIONAL)", style="Muted.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(14, 0))
+        self.asr_context_entry = ttk.Entry(setup, textvariable=self.asr_context)
+        self.asr_context_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(14, 0))
+        ttk.Label(setup, text="Names or specialist terms can help recognition; keep this short.",
+                  style="Muted.TLabel").grid(row=3, column=1, columnspan=3, sticky="w", padx=8, pady=(4, 0))
 
         devices = ttk.Frame(shell, style="Card.TFrame", padding=18)
         devices.pack(fill="x", pady=(0, 14))
@@ -251,6 +267,10 @@ class DesktopApp:
         source = self.source.get()
         self.direction.configure(text=f"{language_name(source)}  →  {language_name(target_for(source))}")
 
+    def _asr_backend_changed(self, _event: object = None) -> None:
+        state = "normal" if ASR_BACKENDS.get(self.asr_backend.get()) == "qwen" else "disabled"
+        self.asr_context_entry.configure(state=state)
+
     def _switch_language(self) -> None:
         self.source.set("fr" if self.source.get() == "en" else "en")
         self._language_changed()
@@ -321,6 +341,8 @@ class DesktopApp:
                 input_device_id=input_id,
                 output_device_id=output_id,
                 endpoint_pause_ms=endpoint_pause_ms,
+                asr_backend=ASR_BACKENDS[self.asr_backend.get()],
+                asr_context=self.asr_context.get(),
             )
         except (TypeError, ValueError) as error:
             self.error_text.set(f"Invalid end-of-speech wait: {error}")
@@ -364,6 +386,10 @@ class DesktopApp:
         self.input_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.output_box.configure(state="disabled" if view.running or view.busy else "readonly")
         self.endpoint_box.configure(state="disabled" if view.running or view.busy else "readonly")
+        self.asr_box.configure(state="disabled" if view.running or view.busy else "readonly")
+        self.asr_context_entry.configure(
+            state="disabled" if view.running or view.busy or ASR_BACKENDS.get(self.asr_backend.get()) != "qwen" else "normal"
+        )
         self.switch_button.configure(state="disabled" if view.running or view.busy else "normal")
 
     def _drain_events(self) -> None:
@@ -422,6 +448,8 @@ class DesktopApp:
                 input_device_id=self._selected_device(self.input_device.get(), self._input_devices),
                 output_device_id=self._selected_device(self.output_device.get(), self._output_devices),
                 endpoint_pause_ms=int(self.endpoint_pause.get().removesuffix(" ms")),
+                asr_backend=ASR_BACKENDS.get(self.asr_backend.get(), "sherpa"),
+                asr_context=self.asr_context.get(),
             ))
         except (OSError, ValueError, RuntimeError) as error:
             logger.warning("Could not save user settings: %s", error)
@@ -438,6 +466,10 @@ class DesktopApp:
 def run_desktop(**kwargs: Any) -> None:
     """Create and run the desktop translation window."""
     DesktopApp(**kwargs).run()
+
+
+def _asr_backend_label(value: str) -> str:
+    return next((label for label, backend in ASR_BACKENDS.items() if backend == value), "Sherpa-ONNX")
 
 
 def _enable_dpi_awareness() -> None:

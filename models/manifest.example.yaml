@@ -22,6 +22,17 @@ models:
     weight_license: "REPLACE_WITH_LICENSE_ID"
     license_url: "REPLACE_WITH_LICENSE_URL"
     attribution: "REPLACE_WITH_REQUIRED_ATTRIBUTION_OR_NONE"
+  - id: asr-qwen3
+    task: streaming-asr
+    languages: [en, fr]
+    revision: "REPLACE_WITH_EXACT_QWEN_MODEL_REVISION"
+    runtime: "Qwen3-ASR 0.6B; vLLM streaming or Transformers phrase mode"
+    files: ["asr/qwen3-asr-0.6b/REPLACE_WITH_MODEL_FILE"]
+    sha256: ["REPLACE_WITH_SHA256"]
+    weight_license: "Apache-2.0"
+    license_url: "https://huggingface.co/Qwen/Qwen3-ASR-0.6B"
+    attribution: "Qwen3-ASR model by the Qwen team; see the model card and license."
+    optional: true
   - id: translation-en-fr
     task: translation
     source: en

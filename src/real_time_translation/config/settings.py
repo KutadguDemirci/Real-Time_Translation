@@ -20,6 +20,8 @@ class Settings:
     input_device_id: int | None = None
     output_device_id: int | None = None
     endpoint_pause_ms: int = 800
+    asr_backend: str = "sherpa"
+    asr_context: str = ""
     cpu_threads: int | None = None
     model_profile: str = "auto"
     diagnostic_capture: bool = False
@@ -134,6 +136,14 @@ def _validate(name: str, value: Any) -> Any:
         if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 5000:
             raise ValueError("expected an integer between 100 and 5000")
         return value
+    if name == "asr_backend":
+        if not isinstance(value, str) or value.strip().lower() not in {"sherpa", "qwen"}:
+            raise ValueError("expected 'sherpa' or 'qwen'")
+        return value.strip().lower()
+    if name == "asr_context":
+        if not isinstance(value, str) or len(value) > 2000:
+            raise ValueError("expected text no longer than 2000 characters")
+        return value.strip()
     if name == "cpu_threads":
         if value is None:
             return None

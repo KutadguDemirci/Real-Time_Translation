@@ -39,6 +39,7 @@ class ModelAsset:
     target: str | None = None
     attribution: str | None = None
     license_path: str | None = None
+    optional: bool = False
 
     @property
     def language_pair(self) -> tuple[str, str] | None:
@@ -125,6 +126,7 @@ def validate_manifest(
     model_dir: str | Path,
     *,
     check_hashes: bool = True,
+    include_optional: bool = True,
 ) -> list[str]:
     """Return actionable errors for missing, unsafe, or checksum-mismatched local assets."""
     root = Path(model_dir).expanduser().resolve()
@@ -132,6 +134,8 @@ def validate_manifest(
     if not root.is_dir():
         return [f"Model directory does not exist: {root}. Create it and install the assets listed in the manifest."]
     for model in manifest.models:
+        if model.optional and not include_optional:
+            continue
         for relative, expected in zip(model.files, model.sha256):
             try:
                 file_path = _contained_path(root, relative)
@@ -215,6 +219,9 @@ def _parse_asset(item: Mapping[str, Any], label: str) -> tuple[ModelAsset | None
     for key, value in (("license_file", license_path),):
         if value is not None and (not isinstance(value, str) or not value.strip() or _is_placeholder(value)):
             errors.append(f"{label}.{key} must be a non-empty value when provided")
+    optional = item.get("optional", False)
+    if not isinstance(optional, bool):
+        errors.append(f"{label}.optional must be true or false")
     if errors:
         return None, errors
     return ModelAsset(
@@ -225,6 +232,7 @@ def _parse_asset(item: Mapping[str, Any], label: str) -> tuple[ModelAsset | None
         target=target.strip().lower() if isinstance(target, str) else None,
         attribution=attribution.strip() if isinstance(attribution, str) else None,
         license_path=license_path.strip() if isinstance(license_path, str) else None,
+        optional=optional if isinstance(optional, bool) else False,
     ), []
 
 

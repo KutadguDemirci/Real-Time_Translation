@@ -154,6 +154,19 @@ def download(url: str, destination: Path) -> None:
 
 def main() -> int:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    existing_optional: list[dict[str, object]] = []
+    existing_manifest_path = MODEL_DIR / "manifest.yaml"
+    if existing_manifest_path.is_file():
+        try:
+            with existing_manifest_path.open("r", encoding="utf-8") as stream:
+                existing_manifest = yaml.safe_load(stream)
+            if isinstance(existing_manifest, dict) and isinstance(existing_manifest.get("models"), list):
+                existing_optional = [
+                    entry for entry in existing_manifest["models"]
+                    if isinstance(entry, dict) and entry.get("optional") is True
+                ]
+        except (OSError, UnicodeError, yaml.YAMLError):
+            print(f"Could not read existing optional model records from {existing_manifest_path}", file=sys.stderr)
     manifest_assets: list[dict[str, object]] = []
     for asset in ASSETS:
         files: list[str] = []
@@ -179,6 +192,11 @@ def main() -> int:
         if "voice_model" in asset:
             manifest_asset["voice_model"] = asset["voice_model"]
         manifest_assets.append(manifest_asset)
+
+    starter_ids = {asset["id"] for asset in manifest_assets}
+    manifest_assets.extend(
+        asset for asset in existing_optional if asset.get("id") not in starter_ids
+    )
 
     manifest = {"schema_version": 1, "models": manifest_assets}
     manifest_path = MODEL_DIR / "manifest.yaml"

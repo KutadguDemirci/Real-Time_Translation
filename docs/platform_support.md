@@ -14,6 +14,10 @@ matrix when implementation begins.
 4. Report the chosen backend and fall back to CPU if accelerated model initialization fails.
 5. Give actionable guidance for unavailable microphones, speakers, permissions, and model files.
 
+Qwen3-ASR's native streaming adapter uses the optional vLLM backend where that runtime is
+available. The app uses phrase-final Transformers inference on Windows and macOS, keeping those
+platforms usable without vLLM; this mode has no interim transcript during the active phrase.
+
 ## macOS
 
 Request microphone permission through the desktop framework and explain how to enable it in

@@ -30,10 +30,17 @@ must be explicit: on overloaded queues, report status and avoid unbounded memory
 
 ## Phrase policy
 
-The streaming recognizer emits revisions. The UI may replace the current partial transcript.
-VAD silence plus a final ASR flush commits a source phrase exactly once. The initial configurable
-trailing-silence default is 800 ms; tune it in the desktop UI. Translate only committed source text,
-then synthesize and play it in order. Do not speak replaceable partial text.
+The streaming recognizer emits replaceable revisions. Qwen's vLLM state retains a short
+unfixed tail (two model chunks / five tokens) so the decoder can revise recent words when
+more audio arrives; the adapter sends audio in one-second increments and configures Qwen's
+model chunk size to two seconds, following its reference streaming example. The UI may replace the current partial
+transcript; only the latest whole hypothesis is committed. VAD silence plus a final ASR flush
+commits a source phrase exactly once. The initial configurable trailing-silence default is 800 ms;
+tune it in the desktop UI. Translate only committed source text, then synthesize and play it in
+order. Do not speak replaceable partial text. Qwen3-ASR uses its native vLLM streaming backend
+where available; on Windows and macOS it buffers one complete VAD phrase and transcribes it with
+the Transformers backend at endpoint, without provisional text. A short Qwen vocabulary/context
+hint is scoped to each phrase and must not be treated as conversation history.
 
 ## Device and runtime policy
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from real_time_translation.asr.sherpa_adapter import SherpaStreamingRecognizer, TransducerModel
+from real_time_translation.asr.qwen_adapter import QwenStreamingRecognizer
 from real_time_translation.audio.capture import AudioCapture
 from real_time_translation.audio.playback import AudioPlayback
 from real_time_translation.audio.vad import VoiceActivityDetector
@@ -53,41 +54,60 @@ def create_coordinator(
     def resolve(model_id: str):
         return resolver.resolve(model_id, manifest)
 
-    asr = resolve(f"asr-{source_language}")
-    # English model files carry versioned encoder/decoder/joiner names.
-    tokens = next((path for path in asr.files if path.name == "tokens.txt"), None)
-    encoder = next(
-        (path for path in asr.files if path.name.startswith("encoder") and path.suffix == ".onnx"),
-        None,
-    )
-    decoder = next(
-        (path for path in asr.files if path.name.startswith("decoder") and path.suffix == ".onnx"),
-        None,
-    )
-    joiner = next(
-        (path for path in asr.files if path.name.startswith("joiner") and path.suffix == ".onnx"),
-        None,
-    )
-    if tokens is None or encoder is None or decoder is None or joiner is None:
-        raise ValueError(
-            f"ASR model {asr.asset.id} must list tokens.txt and encoder, decoder, and joiner ONNX files."
+    if settings.asr_backend == "qwen":
+        try:
+            asr = resolve("asr-qwen3")
+        except KeyError as error:
+            raise ValueError(
+                "Qwen3-ASR is not registered in the local model manifest. Run "
+                "`python models/fetch_qwen_asr.py` and select Qwen again."
+            ) from error
+        if source_language not in asr.asset.languages:
+            raise ValueError(
+                f"Qwen ASR asset {asr.asset.id} does not list support for {source_language}."
+            )
+        recognizer = QwenStreamingRecognizer(
+            asr.files[0].parent,
+            source_language,
+            context=settings.asr_context,
+            torch_device=device.torch_device,
         )
-    transducer = TransducerModel(
-        tokens=tokens,
-        encoder=encoder,
-        decoder=decoder,
-        joiner=joiner,
-    )
-    provider = {
-        "CUDAExecutionProvider": "cuda",
-        "CoreMLExecutionProvider": "coreml",
-    }.get(device.onnx_provider, "cpu")
-    recognizer = SherpaStreamingRecognizer(
-        transducer,
-        source_language,
-        num_threads=settings.cpu_threads,
-        provider=provider,
-    )
+    else:
+        asr = resolve(f"asr-{source_language}")
+        # English model files carry versioned encoder/decoder/joiner names.
+        tokens = next((path for path in asr.files if path.name == "tokens.txt"), None)
+        encoder = next(
+            (path for path in asr.files if path.name.startswith("encoder") and path.suffix == ".onnx"),
+            None,
+        )
+        decoder = next(
+            (path for path in asr.files if path.name.startswith("decoder") and path.suffix == ".onnx"),
+            None,
+        )
+        joiner = next(
+            (path for path in asr.files if path.name.startswith("joiner") and path.suffix == ".onnx"),
+            None,
+        )
+        if tokens is None or encoder is None or decoder is None or joiner is None:
+            raise ValueError(
+                f"ASR model {asr.asset.id} must list tokens.txt and encoder, decoder, and joiner ONNX files."
+            )
+        transducer = TransducerModel(
+            tokens=tokens,
+            encoder=encoder,
+            decoder=decoder,
+            joiner=joiner,
+        )
+        provider = {
+            "CUDAExecutionProvider": "cuda",
+            "CoreMLExecutionProvider": "coreml",
+        }.get(device.onnx_provider, "cpu")
+        recognizer = SherpaStreamingRecognizer(
+            transducer,
+            source_language,
+            num_threads=settings.cpu_threads,
+            provider=provider,
+        )
 
     translation_dirs: dict[tuple[str, str], Path] = {}
     for source, target in (("en", "fr"), ("fr", "en")):
