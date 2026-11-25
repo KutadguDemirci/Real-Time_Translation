@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from collections import deque
+from contextlib import closing
+from dataclasses import replace
 import logging
 import queue
 import threading
@@ -15,7 +17,7 @@ from real_time_translation.audio.playback import AudioPlayback
 from real_time_translation.audio.vad import VoiceActivityDetector
 from real_time_translation.asr.base import StreamingRecognizer
 from real_time_translation.domain.events import (
-    DomainEvent, LatencyRecorded, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
+    DomainEvent, LatencyRecorded, PhraseCommitted, PlaybackStarted, RecoverableError, SessionStatus, StatusChanged,
     SynthesizedAudio, TranscriptUpdated, TranslationCompleted,
 )
 from real_time_translation.domain.languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES, target_for
@@ -23,7 +25,9 @@ from real_time_translation.domain.segments import Phrase
 from real_time_translation.pipeline.phrase_committer import PhraseCommitter
 from real_time_translation.pipeline.timing import TimingCollector
 from real_time_translation.translation.base import Translator
-from real_time_translation.tts.base import SpeechSynthesizer
+from real_time_translation.tts.base import (
+    SpeechResult, SpeechSynthesizer, StreamingSpeechSynthesizer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +279,6 @@ class SessionCoordinator:
             self._process_phrase(phrase)
 
     def _process_phrase(self, phrase: Phrase) -> None:
-        speech_end_at = self._phrase_speech_end.get(phrase.phrase_id)
         phrase_started = time.monotonic()
         queued_at = self._phrase_queued_at.pop(phrase.phrase_id, phrase.committed_at)
         self._record_latency(
@@ -305,7 +308,16 @@ class SessionCoordinator:
             self._record_latency(phrase.phrase_id, "MT total", translation_wall_ms)
             self.timing.mark(phrase.phrase_id, "synthesis_started")
             synthesis_started = time.perf_counter()
-            speech = self.synthesizer.synthesize(event.text)
+            play_stream = (
+                self.playback.play_stream if hasattr(self.playback, "play_stream") else None
+            )
+            streaming = isinstance(self.synthesizer, StreamingSpeechSynthesizer) and play_stream is not None
+            if isinstance(self.synthesizer, StreamingSpeechSynthesizer) and play_stream is not None:
+                speech = self._stream_phrase(
+                    phrase.phrase_id, self.synthesizer.synthesize_stream(event.text), play_stream,
+                )
+            else:
+                speech = self.synthesizer.synthesize(event.text)
             synthesis_wall_ms = (time.perf_counter() - synthesis_started) * 1000.0
             speech_at = time.monotonic()
             self.timing.mark(phrase.phrase_id, "synthesis_completed", speech_at)
@@ -317,36 +329,67 @@ class SessionCoordinator:
             ))
             self._record_latency(phrase.phrase_id, "TTS inference", speech.synthesis_time_ms)
             self._record_latency(phrase.phrase_id, "TTS total", synthesis_wall_ms)
-            enqueue_started = time.perf_counter()
-            self._playback_enqueued[phrase.phrase_id] = time.monotonic()
-            try:
-                if hasattr(self.playback, "on_playback_started"):
-                    self.playback.play(speech, timeout=2.0, phrase_id=phrase.phrase_id)
-                else:
-                    self.playback.play(speech, timeout=2.0)
-            except Exception:
-                self._playback_enqueued.pop(phrase.phrase_id, None)
-                self._phrase_speech_end.pop(phrase.phrase_id, None)
-                raise
-            enqueue_ms = (time.perf_counter() - enqueue_started) * 1000.0
-            self._record_latency(phrase.phrase_id, "Playback enqueue", enqueue_ms)
-            # A no-op fallback keeps custom playback adapters useful if they do not expose
-            # the AudioPlayback start callback.
-            if not hasattr(self.playback, "on_playback_started"):
-                playback_started = time.monotonic()
-                self._record_latency(
-                    phrase.phrase_id,
-                    "Playback queue",
-                    max(0.0, (playback_started - self._playback_enqueued.pop(phrase.phrase_id, playback_started)) * 1000.0),
-                )
-                if speech_end_at is not None:
-                    self._record_latency(phrase.phrase_id, "Speech → playback", max(0.0, (playback_started - speech_end_at) * 1000.0))
-                self._phrase_speech_end.pop(phrase.phrase_id, None)
-            self.timing.mark(phrase.phrase_id, "playback_enqueued")
-            self._set_status(SessionStatus.LISTENING, self._listening_detail)
+            if not streaming:
+                def enqueue() -> None:
+                    if hasattr(self.playback, "on_playback_started"):
+                        self.playback.play(speech, timeout=2.0, phrase_id=phrase.phrase_id)
+                    else:
+                        self.playback.play(speech, timeout=2.0)
+
+                self._enqueue_playback(phrase.phrase_id, enqueue)
+            if not self._stop.is_set():
+                self._set_status(SessionStatus.LISTENING, self._listening_detail)
         except Exception as error:
             self._error("translation_pipeline", str(error), phrase.phrase_id)
             self._set_status(SessionStatus.LISTENING, "Listening after a phrase error")
+
+    def _stream_phrase(
+        self,
+        phrase_id: str,
+        chunks: Generator[SpeechResult, None, None],
+        play_stream: Callable[..., None],
+    ) -> SpeechResult:
+        remaining_pcm: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
+        started = time.perf_counter()
+        with closing(chunks):
+            first = next((chunk for chunk in chunks if chunk.pcm), None)
+            if first is None:
+                raise RuntimeError("TTS returned no usable audio.")
+            self._record_latency(phrase_id, "TTS first chunk", (time.perf_counter() - started) * 1000.0)
+            self._enqueue_playback(
+                phrase_id, lambda: play_stream(first, remaining_pcm, timeout=2.0, phrase_id=phrase_id)
+            )
+            pcm = bytearray(first.pcm)
+            inference_ms = first.synthesis_time_ms
+            try:
+                for chunk in chunks:
+                    if not chunk.pcm:
+                        continue
+                    if (chunk.sample_rate, chunk.channels, chunk.sample_width) != (
+                        first.sample_rate, first.channels, first.sample_width
+                    ):
+                        raise ValueError("TTS changed audio format during a phrase.")
+                    remaining_pcm.put(chunk.pcm)
+                    pcm.extend(chunk.pcm)
+                    inference_ms += chunk.synthesis_time_ms
+            finally:
+                remaining_pcm.put(None)
+        return replace(first, pcm=bytes(pcm), synthesis_time_ms=inference_ms)
+
+    def _enqueue_playback(self, phrase_id: str, enqueue: Callable[[], None]) -> None:
+        started = time.monotonic()
+        self._playback_enqueued[phrase_id] = started
+        try:
+            enqueue()
+        except Exception:
+            self._playback_enqueued.pop(phrase_id, None)
+            self._phrase_speech_end.pop(phrase_id, None)
+            raise
+        enqueued_at = time.monotonic()
+        self._record_latency(phrase_id, "Playback enqueue", (enqueued_at - started) * 1000.0)
+        self.timing.mark(phrase_id, "playback_enqueued", enqueued_at)
+        if not hasattr(self.playback, "on_playback_started"):
+            self._record_playback_start(phrase_id, enqueued_at)
 
     def _publish_update(self, update: Any, started_at: float | None = None) -> None:
         try:
@@ -385,12 +428,16 @@ class SessionCoordinator:
     def _on_playback_started(self, phrase_id: str | None, started_at: float) -> None:
         if phrase_id is None:
             return
+        self._record_playback_start(phrase_id, started_at)
+        self._playback_started[phrase_id] = started_at
+        self._emit(PlaybackStarted(phrase_id, self.target_language))
+
+    def _record_playback_start(self, phrase_id: str, started_at: float) -> None:
         enqueued_at = self._playback_enqueued.pop(phrase_id, started_at)
         self._record_latency(phrase_id, "Playback queue", max(0.0, (started_at - enqueued_at) * 1000.0))
         speech_end_at = self._phrase_speech_end.pop(phrase_id, None)
         if speech_end_at is not None:
             self._record_latency(phrase_id, "Speech → playback", max(0.0, (started_at - speech_end_at) * 1000.0))
-        self._playback_started[phrase_id] = started_at
 
     def _on_playback_finished(self, phrase_id: str | None, finished_at: float) -> None:
         if phrase_id is None:
@@ -419,11 +466,16 @@ class SessionCoordinator:
                 logger.exception("Error while closing %s", type(component).__name__)
 
     def _unload_models(self) -> None:
-        for component in (self.recognizer, self.translator, self.synthesizer):
+        releases: tuple[tuple[str, Callable[[], None]], ...] = (
+            (type(self.recognizer).__name__, self.recognizer.close),
+            (type(self.translator).__name__, self.translator.unload),
+            (type(self.synthesizer).__name__, self.synthesizer.unload),
+        )
+        for component_name, release in releases:
             try:
-                component.close() if component is self.recognizer else component.unload()
+                release()
             except Exception:
-                logger.exception("Error while releasing %s", type(component).__name__)
+                logger.exception("Error while releasing %s", component_name)
 
     @staticmethod
     def _join(thread: threading.Thread | None, timeout: float) -> None:

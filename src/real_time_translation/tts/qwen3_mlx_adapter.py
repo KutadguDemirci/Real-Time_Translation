@@ -8,6 +8,8 @@ import shutil
 import tempfile
 import threading
 import time
+from collections.abc import Generator
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -23,6 +25,7 @@ class Qwen3MLXSynthesizer:
 
     model_name = "Qwen3-TTS 0.6B Base (MLX 8-bit)"
     sample_rate = 24_000
+    streaming_interval = 0.32
 
     def __init__(
         self,
@@ -133,6 +136,44 @@ class Qwen3MLXSynthesizer:
             return SpeechResult(pcm, sample_rate, 1, 2, elapsed_ms, self.model_name,
                                 selected.target_lang, "mlx-metal")
 
+    def synthesize_stream(self, text: str) -> Generator[SpeechResult, None, None]:
+        """Yield voice-cloned PCM as Qwen decodes successive groups of audio tokens."""
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Enter a phrase to synthesize.")
+        selected = replace(self._default_options, target_lang=self._target_lang or "en")
+        selected.validate()
+        with self._lock:
+            self.load(selected.target_lang)
+            assert self._model is not None
+            ref_path, ref_text = self._reference(selected.voice_id)
+            had_audio = False
+            try:
+                started = time.perf_counter()
+                generated = self._model.generate(
+                    text=text.strip(),
+                    lang_code=SUPPORTED_TTS_LANGUAGES[selected.target_lang].lower(),
+                    ref_audio=str(ref_path),
+                    ref_text=ref_text,
+                    temperature=float(selected.temperature),
+                    stream=True,
+                    streaming_interval=self.streaming_interval,
+                )
+                with closing(generated):
+                    for chunk in generated:
+                        pcm = _to_pcm16(chunk.audio, normalize_peak=False)
+                        if not pcm:
+                            continue
+                        had_audio = True
+                        sample_rate = int(getattr(chunk, "sample_rate", self.sample_rate))
+                        elapsed_ms = (time.perf_counter() - started) * 1000.0
+                        yield SpeechResult(pcm, sample_rate, 1, 2, elapsed_ms, self.model_name,
+                                           selected.target_lang, "mlx-metal")
+                        started = time.perf_counter()
+            except Exception as error:
+                raise RuntimeError("Qwen3-TTS could not stream this phrase.") from error
+            if not had_audio:
+                raise RuntimeError("Qwen3-TTS returned no usable audio.")
+
     def unload(self) -> None:
         with self._lock:
             self.clear_custom_reference()
@@ -193,13 +234,14 @@ def _generate(model: Any, text: str, language_code: str, ref_audio: Path,
     return np.concatenate(arrays), int(getattr(result_chunks[0], "sample_rate", 24_000))
 
 
-def _to_pcm16(audio: Any) -> bytes:
+def _to_pcm16(audio: Any, *, normalize_peak: bool = True) -> bytes:
     import numpy as np
 
     samples = np.asarray(audio, dtype=np.float32).reshape(-1)
     if not samples.size or not np.isfinite(samples).all():
         return b""
-    peak = float(np.max(np.abs(samples)))
-    if peak > 1.0:
-        samples = samples / peak
+    if normalize_peak:
+        peak = float(np.max(np.abs(samples)))
+        if peak > 1.0:
+            samples = samples / peak
     return (np.clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()

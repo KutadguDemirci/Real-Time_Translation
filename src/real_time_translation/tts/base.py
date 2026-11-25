@@ -1,7 +1,8 @@
 """TTS requests and protocol for phrase text to PCM audio."""
 
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 SUPPORTED_TTS_LANGUAGES: dict[str, str] = {
@@ -60,5 +61,14 @@ class SpeechSynthesizer(Protocol):
 
     def unload(self) -> None:
         """Release the loaded voice and its inference session."""
+        ...
+
+
+@runtime_checkable
+class StreamingSpeechSynthesizer(SpeechSynthesizer, Protocol):
+    """Optional capability for engines that yield audio during generation."""
+
+    def synthesize_stream(self, text: str) -> Generator[SpeechResult, None, None]:
+        """Yield consecutive PCM chunks with a consistent audio format."""
         ...
 

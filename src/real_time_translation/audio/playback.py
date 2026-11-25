@@ -19,6 +19,7 @@ class PlaybackItem:
     channels: int = 1
     sample_width: int = 2
     phrase_id: str | None = None
+    remaining_pcm: queue.SimpleQueue[bytes | None] | None = None
 
 
 class AudioPlayback:
@@ -33,6 +34,7 @@ class AudioPlayback:
         self._lock = threading.RLock()
         self._muted = False
         self._closed = False
+        self._cancel_streams = threading.Event()
         self.last_error: str | None = None
         self.on_playback_started: Callable[[str | None, float], None] | None = None
         self.on_playback_finished: Callable[[str | None, float], None] | None = None
@@ -52,7 +54,8 @@ class AudioPlayback:
 
     def enqueue(self, pcm: bytes | Any, sample_rate: int, channels: int = 1,
                 sample_width: int = 2, timeout: float | None = None,
-                phrase_id: str | None = None) -> None:
+                phrase_id: str | None = None, *,
+                remaining_pcm: queue.SimpleQueue[bytes | None] | None = None) -> None:
         """Queue one phrase; block up to ``timeout`` when the bounded queue is full."""
         if sample_rate <= 0 or channels < 1 or sample_width != 2:
             raise ValueError("Playback requires a positive sample rate and signed 16-bit PCM.")
@@ -68,7 +71,7 @@ class AudioPlayback:
                 raise RuntimeError("Playback is closed.")
             self._ensure_worker()
         self._queue.put(
-            PlaybackItem(payload, sample_rate, channels, sample_width, phrase_id),
+            PlaybackItem(payload, sample_rate, channels, sample_width, phrase_id, remaining_pcm),
             timeout=timeout,
         )
 
@@ -77,6 +80,12 @@ class AudioPlayback:
         """Enqueue a ``SpeechResult`` without requiring callers to unpack its metadata."""
         self.enqueue(result.pcm, result.sample_rate, result.channels,
                      result.sample_width, timeout=timeout, phrase_id=phrase_id)
+
+    def play_stream(self, first: Any, remaining_pcm: queue.SimpleQueue[bytes | None],
+                    *, timeout: float, phrase_id: str) -> None:
+        """Queue a phrase starting with its first chunk. None ends the phrase."""
+        self.enqueue(first.pcm, first.sample_rate, first.channels, first.sample_width,
+                     timeout=timeout, phrase_id=phrase_id, remaining_pcm=remaining_pcm)
 
     def set_muted(self, muted: bool) -> None:
         with self._lock:
@@ -97,6 +106,7 @@ class AudioPlayback:
 
     def stop(self, flush: bool = True) -> None:
         if flush:
+            self._cancel_streams.set()
             self.flush()
         with self._lock:
             worker, self._worker = self._worker, None
@@ -125,54 +135,66 @@ class AudioPlayback:
                 import numpy as np
                 import sounddevice as sd
 
-                samples = np.frombuffer(item.pcm, dtype="<i2").astype(np.float32) / 32768.0
-                if item.channels > 1:
-                    samples = samples.reshape(-1, item.channels)
                 output_info = sd.query_devices(self.device, "output")
                 output_rate = int(output_info["default_samplerate"])
                 output_channels = min(2, int(output_info["max_output_channels"]))
                 if output_channels < 1:
                     raise RuntimeError("The selected speaker has no output channels.")
-                if item.sample_rate != output_rate:
-                    old_length = samples.shape[0]
-                    new_length = max(1, round(old_length * output_rate / item.sample_rate))
-                    positions = np.linspace(0, old_length - 1, new_length)
-                    if samples.ndim == 1:
-                        samples = np.interp(positions, np.arange(old_length), samples)
-                    else:
-                        samples = np.column_stack([
-                            np.interp(positions, np.arange(old_length), samples[:, channel])
-                            for channel in range(samples.shape[1])
-                        ])
-                if samples.ndim == 1 and output_channels > 1:
-                    samples = np.repeat(samples[:, None], output_channels, axis=1)
-                elif samples.ndim == 2 and samples.shape[1] > output_channels:
-                    samples = samples[:, :output_channels]
-                elif samples.ndim == 2 and samples.shape[1] < output_channels:
-                    samples = np.repeat(samples[:, :1], output_channels, axis=1)
-                # Keep sounddevice's supported high-level playback path. The two
-                # AudioPlayback instances share sounddevice's module-global stream,
-                # so callers must serialize playback instead of opening competing
-                # output streams.
-                sd.play(samples, samplerate=output_rate, device=self.device, blocking=False)
-                callback = self.on_playback_started
-                if callback is not None:
-                    try:
-                        callback(item.phrase_id, time.monotonic())
-                    except Exception:
-                        logger.exception("Playback start callback failed")
-                sd.wait()
-                callback = self.on_playback_finished
-                if callback is not None:
-                    try:
-                        callback(item.phrase_id, time.monotonic())
-                    except Exception:
-                        logger.exception("Playback completion callback failed")
+                samples = _output_samples(np, item.pcm, item, output_rate, output_channels)
+                if item.remaining_pcm is None:
+                    sd.play(samples, samplerate=output_rate, device=self.device, blocking=False)
+                    _notify(self.on_playback_started, item.phrase_id)
+                    sd.wait()
+                else:
+                    with sd.OutputStream(samplerate=output_rate, device=self.device,
+                                         channels=output_channels, dtype="float32") as stream:
+                        _notify(self.on_playback_started, item.phrase_id)
+                        stream.write(samples)
+                        while not self._cancel_streams.is_set():
+                            try:
+                                pcm = item.remaining_pcm.get(timeout=0.1)
+                            except queue.Empty:
+                                continue
+                            if pcm is None:
+                                break
+                            if not pcm:
+                                continue
+                            if len(pcm) % (item.channels * item.sample_width):
+                                raise ValueError("Stream PCM does not contain complete audio frames.")
+                            stream.write(_output_samples(np, pcm, item, output_rate, output_channels))
+                _notify(self.on_playback_finished, item.phrase_id)
                 self.last_error = None
             except Exception as error:
                 self.last_error = (
                     f"Could not play audio: {error}. Check speaker selection, output permissions, "
                     "and whether the device is available."
                 )
+
+
+def _notify(callback: Callable[[str | None, float], None] | None, phrase_id: str | None) -> None:
+    if callback is not None:
+        try:
+            callback(phrase_id, time.monotonic())
+        except Exception:
+            logger.exception("Playback callback failed")
+
+
+def _output_samples(np: Any, pcm: bytes, item: PlaybackItem, output_rate: int,
+                    output_channels: int) -> Any:
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+    samples = samples.reshape(-1, item.channels)
+    if item.sample_rate != output_rate:
+        old_length = samples.shape[0]
+        new_length = max(1, round(old_length * output_rate / item.sample_rate))
+        positions = np.linspace(0, old_length - 1, new_length)
+        samples = np.column_stack([
+            np.interp(positions, np.arange(old_length), samples[:, channel])
+            for channel in range(item.channels)
+        ])
+    if item.channels > output_channels:
+        samples = samples[:, :output_channels]
+    elif item.channels < output_channels:
+        samples = np.repeat(samples[:, :1], output_channels, axis=1)
+    return np.ascontiguousarray(samples, dtype=np.float32)
 
 

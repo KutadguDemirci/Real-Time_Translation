@@ -29,8 +29,8 @@ from real_time_translation.audio.capture import AudioCapture
 from real_time_translation.audio.playback import AudioPlayback
 from real_time_translation.config import Settings, save_settings
 from real_time_translation.domain.events import (
-    DomainEvent, LatencyRecorded, PhraseCommitted, RecoverableError, SessionStatus, StatusChanged,
-    SynthesizedAudio, TranscriptUpdated, TranslationCompleted,
+    DomainEvent, LatencyRecorded, PhraseCommitted, PlaybackStarted, RecoverableError, SessionStatus,
+    StatusChanged, TranscriptUpdated, TranslationCompleted,
 )
 from real_time_translation.domain.languages import SPEECH_LANGUAGES, SUPPORTED_LANGUAGES
 from real_time_translation.ui.view_state import language_name, session_view_state
@@ -44,7 +44,7 @@ VoiceTranscriber = Callable[[Path, str, str, str], str]
 LATENCY_STAGES = (
     "Audio backlog", "VAD compute", "Endpoint silence", "Streaming ASR",
     "ASR flush", "Phrase commit", "Phrase queue", "MT inference", "MT total",
-    "TTS inference", "TTS total", "Playback enqueue", "Playback queue",
+    "TTS first chunk", "TTS inference", "TTS total", "Playback enqueue", "Playback queue",
     "Speech → playback", "Playback duration",
 )
 ASR_BACKENDS = {"Sherpa-ONNX": "sherpa", "Qwen3-ASR": "qwen"}
@@ -970,7 +970,7 @@ class DesktopApp:
                     self._phrase_latencies.setdefault(event.phrase_id, {})[
                         "Speech to translation"] = max(0.0, (event.completed_at - started) * 1000.0)
                 self._add_bubble(event.phrase_id, self._phrase_text.get(event.phrase_id, ""), event.text)
-            elif isinstance(event, SynthesizedAudio):
+            elif isinstance(event, PlaybackStarted):
                 self.status_detail.set(f"Speaking in {language_name(event.target_language)}")
             elif isinstance(event, RecoverableError):
                 self.error_text.set(event.message)

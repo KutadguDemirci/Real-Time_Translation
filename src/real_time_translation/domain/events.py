@@ -103,6 +103,12 @@ class SynthesizedAudio:
 
 
 @dataclass(frozen=True, slots=True)
+class PlaybackStarted:
+    phrase_id: str
+    target_language: str
+
+
+@dataclass(frozen=True, slots=True)
 class LatencyRecorded:
     """One measured processing or endpoint delay associated with a committed phrase."""
 
@@ -160,6 +166,7 @@ DomainEvent: TypeAlias = (
     | PhraseCommitted
     | TranslationCompleted
     | SynthesizedAudio
+    | PlaybackStarted
     | LatencyRecorded
     | StatusChanged
     | RecoverableError

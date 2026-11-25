@@ -29,6 +29,15 @@ Install the runtime with `pip install -e ".[audio,inference,translation,tts,qwen
 
 ## Development environment
 
+Live translation streams Qwen3-TTS audio into a single output stream per phrase, so
+playback can begin while later audio tokens are still being generated. The requested
+chunk interval is 0.32 seconds of audio; this is not a guarantee of first-audio latency.
+ASR and translation still finish the phrase before TTS starts. Voice Studio sample
+generation continues to wait for the complete sample. The latency panel reports
+**TTS first chunk** separately from total synthesis time. MLX inference must be
+validated on macOS with Apple Silicon; the portable tests use an injected model and
+mock speaker output.
+
 The application requires Python 3.11 or newer. See `docs/platform_support.md` for runtime constraints and platform-specific setup. Create an isolated environment, install the project and required extras in editable mode, and run the standard-library test suite with `python -m unittest discover -s tests -v`.
 
 ## User settings
