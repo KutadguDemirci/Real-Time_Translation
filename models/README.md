@@ -36,9 +36,11 @@ uses Transformers 4.57.6. This compatibility path has an upstream metadata misma
 will report MLX Audio's newer Transformers and Hugging Face Hub requirements even though the tested
 Qwen3-TTS path loads with the project's pinned versions. Revalidate it when upgrading either stack.
 Qwen3-TTS uses the 0.6B Base 8-bit MLX checkpoint on macOS Apple Silicon. It is about 2 GB and
-requires a local voice reference plus the exact transcript spoken in that clip. Voice Studio can
-transcribe longer recordings with the selected local ASR backend, save multiple named profiles
-under the user's application-data directory, and reuse a selected profile for live translation.
+requires a local voice reference to build a reusable speaker embedding. Generation uses that
+fixed-size embedding without reference speech tokens or a transcript. Voice Studio can save
+audio-only profiles; optional local transcription remains available. Derived embeddings are
+cached under the user's application-data directory and reused across live phrases and restarts.
+See the speaker-only conditioning section in the main README for cache and compatibility details.
 The Base checkpoint exposes speech sampling variation; it does not provide direct emotion or
 exaggeration controls. The fetch script
 pins the downloaded Hugging Face commit in the manifest and records SHA-256 hashes for every file.

@@ -14,14 +14,16 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from real_time_translation.config.settings import default_config_dir
 from .audio_reference import validate_reference_audio
 from .base import BUILT_IN_VOICES, SUPPORTED_TTS_LANGUAGES, SpeechResult, SynthesisOptions
+from .qwen3_conditioning import SpeakerEmbeddingCache, generate_with_speaker_embedding
 
 logger = logging.getLogger(__name__)
 
 
 class Qwen3MLXSynthesizer:
-    """Keep one quantized MLX model loaded and reuse reference-audio conditioning."""
+    """Keep one MLX model loaded and generate from reusable speaker-only embeddings."""
 
     model_name = "Qwen3-TTS 0.6B Base (MLX 8-bit)"
     sample_rate = 24_000
@@ -33,6 +35,7 @@ class Qwen3MLXSynthesizer:
         voice_references: Mapping[str, tuple[str | Path, str]],
         *,
         model_loader: Callable[[str | Path], Any] | None = None,
+        embedding_cache_dir: str | Path | None = None,
     ) -> None:
         self.model_dir = Path(model_dir).expanduser().resolve()
         self.voice_references = {
@@ -41,10 +44,13 @@ class Qwen3MLXSynthesizer:
         }
         if set(self.voice_references) != set(BUILT_IN_VOICES):
             raise ValueError("Exactly two local preset reference voices must be configured.")
-        if any(not transcript for _, transcript in self.voice_references.values()):
-            raise ValueError("Each preset voice must include the exact reference transcript.")
         self._model_loader = model_loader or _load_local_model
         self._model: Any | None = None
+        self._embedding_cache_dir = (
+            Path(embedding_cache_dir) if embedding_cache_dir is not None
+            else default_config_dir() / "voice_embeddings"
+        )
+        self._embeddings: SpeakerEmbeddingCache | None = None
         self._target_lang: str | None = None
         self._custom_reference: Path | None = None
         self._custom_directory: Path | None = None
@@ -61,6 +67,12 @@ class Qwen3MLXSynthesizer:
         return SUPPORTED_TTS_LANGUAGES
 
     def load(self, target_lang: str) -> None:
+        """Load the model and prepare the selected voice before capture starts."""
+        with self._lock:
+            self._load_model(target_lang)
+            self._speaker_embedding(self._default_options.voice_id)
+
+    def _load_model(self, target_lang: str) -> None:
         language = target_lang.strip().lower()
         if language not in SUPPORTED_TTS_LANGUAGES:
             raise ValueError(f"Unsupported TTS language: {target_lang!r}.")
@@ -74,16 +86,19 @@ class Qwen3MLXSynthesizer:
                     )
                 try:
                     self._model = self._model_loader(self.model_dir)
+                    self._embeddings = SpeakerEmbeddingCache(
+                        self.model_dir, self._embedding_cache_dir,
+                    )
                 except Exception as error:
+                    self._model = None
+                    self._embeddings = None
                     raise RuntimeError("Could not load the local Qwen3-TTS MLX 8-bit model.") from error
                 logger.info("Loaded %s on Apple MLX/Metal from %s", self.model_name, self.model_dir)
             self._target_lang = language
 
-    def set_custom_reference(self, path: str | Path, transcript: str) -> None:
-        """Keep a validated, private copy for repeated Base-model voice-clone requests."""
+    def set_custom_reference(self, path: str | Path, transcript: str = "") -> None:
+        """Keep private reference audio; transcript is optional profile metadata."""
         clean_transcript = transcript.strip()
-        if not clean_transcript:
-            raise ValueError("Enter the exact words spoken in the reference recording.")
         validate_reference_audio(path)
         with self._lock:
             self.clear_custom_reference()
@@ -104,6 +119,8 @@ class Qwen3MLXSynthesizer:
 
     def clear_custom_reference(self) -> None:
         with self._lock:
+            if self._embeddings is not None and self._custom_reference is not None:
+                self._embeddings.forget(self._custom_reference)
             if self._custom_directory is not None:
                 shutil.rmtree(self._custom_directory, ignore_errors=True)
             self._custom_reference = None
@@ -120,16 +137,17 @@ class Qwen3MLXSynthesizer:
         selected = options or replace(self._default_options, target_lang=self._target_lang or "en")
         selected.validate()
         with self._lock:
-            self.load(selected.target_lang)
+            self._load_model(selected.target_lang)
             assert self._model is not None
-            ref_path, ref_text = self._reference(selected.voice_id)
+            self._reference(selected.voice_id)
             started = time.perf_counter()
             try:
+                embedding = self._speaker_embedding(selected.voice_id)
                 audio, sample_rate = _generate(self._model, text.strip(), selected.target_lang,
-                                               ref_path, ref_text, float(selected.temperature))
+                                               embedding, float(selected.temperature))
                 pcm = _to_pcm16(audio)
             except Exception as error:
-                raise RuntimeError("Qwen3-TTS could not synthesize this phrase. Check its language and reference transcript.") from error
+                raise RuntimeError("Qwen3-TTS could not synthesize this phrase. Check its language and voice profile.") from error
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             if not pcm:
                 raise RuntimeError("Qwen3-TTS returned no usable audio.")
@@ -143,17 +161,17 @@ class Qwen3MLXSynthesizer:
         selected = replace(self._default_options, target_lang=self._target_lang or "en")
         selected.validate()
         with self._lock:
-            self.load(selected.target_lang)
+            self._load_model(selected.target_lang)
             assert self._model is not None
-            ref_path, ref_text = self._reference(selected.voice_id)
+            self._reference(selected.voice_id)
             had_audio = False
             try:
                 started = time.perf_counter()
-                generated = self._model.generate(
+                embedding = self._speaker_embedding(selected.voice_id)
+                generated = generate_with_speaker_embedding(
+                    self._model, embedding,
                     text=text.strip(),
                     lang_code=SUPPORTED_TTS_LANGUAGES[selected.target_lang].lower(),
-                    ref_audio=str(ref_path),
-                    ref_text=ref_text,
                     temperature=float(selected.temperature),
                     stream=True,
                     streaming_interval=self.streaming_interval,
@@ -178,14 +196,20 @@ class Qwen3MLXSynthesizer:
         with self._lock:
             self.clear_custom_reference()
             self._model = None
+            self._embeddings = None
             self._target_lang = None
             gc.collect()
 
+    def _speaker_embedding(self, voice_id: str) -> Any:
+        assert self._model is not None and self._embeddings is not None
+        reference, _transcript = self._reference(voice_id)
+        return self._embeddings.get(self._model, reference)
+
     def _reference(self, voice_id: str) -> tuple[Path, str]:
         if voice_id == "custom":
-            if self._custom_reference is None or self._custom_transcript is None:
-                raise ValueError("Add a valid reference recording and its exact transcript before cloning.")
-            return self._custom_reference, self._custom_transcript
+            if self._custom_reference is None:
+                raise ValueError("Add a valid reference recording before cloning.")
+            return self._custom_reference, self._custom_transcript or ""
         reference, transcript = self.voice_references[voice_id]
         if not reference.is_file():
             raise FileNotFoundError(f"The {BUILT_IN_VOICES[voice_id]} reference recording is missing.")
@@ -214,16 +238,15 @@ def _load_local_model(model_dir: str | Path) -> Any:
         return load_model(str(model_dir))
 
 
-def _generate(model: Any, text: str, language_code: str, ref_audio: Path,
-              ref_text: str, temperature: float = 0.9) -> tuple[Any, int]:
+def _generate(model: Any, text: str, language_code: str, embedding: Any,
+              temperature: float = 0.9) -> tuple[Any, int]:
     # mlx-audio's Qwen3-TTS API calls this parameter ``lang_code``. Passing
     # ``language`` is silently swallowed by **kwargs and leaves language on auto.
     language = SUPPORTED_TTS_LANGUAGES[language_code].lower()
-    result_chunks = list(model.generate(
+    result_chunks = list(generate_with_speaker_embedding(
+        model, embedding,
         text=text,
         lang_code=language,
-        ref_audio=str(ref_audio),
-        ref_text=ref_text,
         temperature=temperature,
     ))
     if not result_chunks:

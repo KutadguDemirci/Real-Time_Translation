@@ -123,7 +123,7 @@ class VoiceStudio:
         outer = ttk.Frame(self.window, style="Studio.TFrame", padding=(22, 18))
         outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="Voice Studio", style="StudioTitle.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Record a natural sample, transcribe it locally, then save a named voice.",
+        ttk.Label(outer, text="Record a natural sample and save a named voice. Transcription is optional.",
                   style="StudioBody.TLabel").pack(anchor="w", pady=(2, 12))
 
         profile_frame = ttk.LabelFrame(outer, text="Voice profile", padding=(10, 8))
@@ -164,7 +164,7 @@ class VoiceStudio:
         ttk.Label(language_row, text=f"ASR: {self.asr_backend.upper()} · context follows the main window setting",
                   style="StudioMuted.TLabel").pack(side="left", padx=6)
 
-        ttk.Label(record_frame, text="Transcript (automatically filled; edit if needed)",
+        ttk.Label(record_frame, text="Transcript (optional; not needed to clone the voice)",
                   style="StudioBody.TLabel").pack(anchor="w")
         self.transcript_box = tk.Text(record_frame, height=5, wrap="word", font=("Avenir Next", 10),
                                       background="#f5f8f7", foreground="#152c2a", relief="flat",
@@ -369,7 +369,7 @@ class VoiceStudio:
         self.reference_name.set(f"{self._reference_path.name} · {info.duration_seconds:.1f}s")
         self.preview_button.configure(state="normal")
         self.consent.set(False)
-        self._set_status("Recording selected. Transcribe it, name it, then save it as a voice profile.")
+        self._set_status("Recording selected. Name it and save it as a voice profile.")
 
     def transcribe(self) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -519,7 +519,7 @@ class VoiceStudio:
                 self.transcript_box.delete("1.0", "end")
                 self.preview_button.configure(state="normal")
                 self.consent.set(False)
-                self._set_status("Recording saved temporarily. Transcribe it, name it, and save the profile.")
+                self._set_status("Recording saved temporarily. Name it and save the profile.")
             elif kind == "transcribed":
                 self.transcribe_button.configure(state="normal")
                 self.transcript_box.delete("1.0", "end")

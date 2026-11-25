@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import hashlib
 from pathlib import Path
 import struct
 import tempfile
@@ -27,7 +28,9 @@ class VoiceProfileStoreTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.reference = self.root / "reference.wav"
         write_reference(self.reference)
-        self.store = VoiceProfileStore(self.root / "profiles")
+        self.store = VoiceProfileStore(
+            self.root / "profiles", embedding_cache_dir=self.root / "embeddings",
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -44,12 +47,26 @@ class VoiceProfileStoreTests(unittest.TestCase):
         self.assertFalse(profile.audio_path.exists())
         self.assertEqual(self.store.list_profiles(), [])
 
-    def test_requires_name_transcript_and_unique_names(self) -> None:
+    def test_deleting_voice_removes_its_cached_embeddings_only(self) -> None:
+        profile = self.store.save("My voice", self.reference, "", "en")
+        directory = self.root / "embeddings"
+        directory.mkdir()
+        digest = hashlib.sha256(profile.audio_path.read_bytes()).hexdigest()[:32]
+        own_cache = directory / f"{digest}-model.npy"
+        other_cache = directory / "other-voice-model.npy"
+        own_cache.write_bytes(b"cached embedding")
+        other_cache.write_bytes(b"other voice")
+        self.store.delete(profile.profile_id)
+        self.assertFalse(own_cache.exists())
+        self.assertTrue(other_cache.exists())
+
+    def test_requires_name_and_unique_names_but_allows_audio_only_profiles(self) -> None:
         with self.assertRaisesRegex(ValueError, "Voice names"):
             self.store.save("  ", self.reference, "words", "en")
-        with self.assertRaisesRegex(ValueError, "Transcribe"):
-            self.store.save("My voice", self.reference, " ", "en")
-        self.store.save("My voice", self.reference, "words", "en")
+        profile = self.store.save("My voice", self.reference, " ", "en")
+        saved = self.store.get(profile.profile_id)
+        assert saved is not None
+        self.assertEqual(saved.transcript, "")
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.store.save("my VOICE", self.reference, "other words", "en")
 

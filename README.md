@@ -23,9 +23,38 @@ See `docs/architecture.md` for the component diagram and data flow, `docs/implem
 
 Model files are intentionally kept outside source control. Run the acquisition scripts described in `models/README.md` to download the selected ASR, translation, and TTS assets into the per-user model directory (or set `REAL_TIME_TRANSLATION_MODEL_DIR`). The scripts write `manifest.yaml` with exact revisions, paths, checksums, and license metadata. The model resolver checks file hashes and reports missing or invalid assets before they are loaded.
 
-The app can use Sherpa-ONNX for English/French or optional Qwen3-ASR for all seven languages. Qwen uses its native streaming API through vLLM where available; elsewhere it transcribes the complete VAD phrase at the endpoint and therefore does not show interim partials. Both paths commit one final whole-phrase transcript before translation. Every language pair uses the same Helsinki-NLP OPUS-MT multilingual models, translating through English when neither language is English. The live output selector offers English, French, German, Spanish, Italian, and Mandarin Chinese; Turkish speech output is omitted. Open **Voice Studio** to choose the generic **Agent** or **Cartoon** reference voice, or record up to five minutes and transcribe it in any Qwen3-ASR language. Name and save multiple voice profiles, then select them for samples and live translation. Qwen Base uses a reference recording and its transcript for cloning; recordings and profiles stay local. Its Base checkpoint supports sampling variation, not direct emotion or exaggeration controls.
+The app can use Sherpa-ONNX for English/French or optional Qwen3-ASR for all seven languages. Qwen uses its native streaming API through vLLM where available; elsewhere it transcribes the complete VAD phrase at the endpoint and therefore does not show interim partials. Both paths commit one final whole-phrase transcript before translation. Every language pair uses the same Helsinki-NLP OPUS-MT multilingual models, translating through English when neither language is English. The live output selector offers English, French, German, Spanish, Italian, and Mandarin Chinese; Turkish speech output is omitted. Open **Voice Studio** to choose the generic **Agent** or **Cartoon** reference voice, or record up to five minutes and transcribe it in any Qwen3-ASR language. Name and save multiple voice profiles, then select them for samples and live translation. Qwen Base uses a cached speaker embedding extracted from the recording; transcription is optional and is not used for synthesis. Recordings, embeddings, and profiles stay local. Its Base checkpoint supports sampling variation, not direct emotion or exaggeration controls.
 
 Install the runtime with `pip install -e ".[audio,inference,translation,tts,qwen-asr]"`. On macOS Apple Silicon, run `python models/install_qwen_tts_mlx_runtime.py` to install the pinned MLX Audio runtime without replacing Transformers 4.57.6, then run `python models/fetch_models.py`, `python models/fetch_translation_models.py`, `python models/fetch_qwen_asr.py`, and `python models/fetch_qwen_tts_mlx.py`. The selected 8-bit TTS checkpoint is about 2 GB and is verified against a local SHA-256 manifest. See `models/README.md` for setup. Translation and Qwen ASR use PyTorch; ONNX Runtime prefers CUDA, then Apple CoreML on macOS, then CPU fallback. The bundled TTS adapter is MLX-only, so the app does not currently support live translation on Windows.
+
+## Speaker-only voice conditioning
+
+TTS uses a fixed-size speaker embedding for both live translation and Voice Studio
+samples. The selected voice is prepared when a live session loads, before microphone
+capture starts. Subsequent phrases reuse the embedding without reloading or encoding
+the reference waveform, and without reference speech or transcript tokens in the
+model prompt. The first use of a new recording still has a profiling cost.
+
+Recordings are profiled in chunks of at most six seconds and their embeddings are
+averaged into one vector. Longer recordings increase this one-time work, not the
+size of generation conditioning. More audio does not guarantee a better clone;
+speaker-only conditioning can lose similarity, accent, and expressive detail compared
+with full reference-audio/text conditioning.
+
+Embeddings persist as non-pickle NumPy files under `voice_embeddings` in the app's
+config directory. Recording content, model file identity, profiling algorithm, and
+MLX Audio version identify cache entries. Changed recordings/models are reprofiled;
+unreadable cache entries are rebuilt. Deleting a saved voice removes its derived
+embedding cache entries. Existing voice profiles continue to work, and new profiles
+can be saved without transcription.
+
+MLX Audio's pinned Qwen implementation uses `ref_text=None` for speaker-only
+conditioning. A serialized compatibility hook supplies the cached embedding to its
+speaker extractor; a constant-size marker selects that path. The normal MLX token
+generator and streaming codec remain in use. The adapter fails if the runtime emits
+audio without consuming the embedding, rather than silently using a different voice.
+Revalidate this hook when upgrading MLX Audio. Actual latency and voice quality must
+be measured on Apple Silicon; portable tests do not establish hardware performance.
 
 ## Development environment
 

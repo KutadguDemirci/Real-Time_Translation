@@ -13,6 +13,7 @@ import uuid
 from real_time_translation.config.settings import default_config_dir
 from real_time_translation.domain.languages import SUPPORTED_LANGUAGES
 from .audio_reference import validate_reference_audio
+from .qwen3_conditioning import remove_reference_embeddings
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,8 +28,10 @@ class VoiceProfile:
 class VoiceProfileStore:
     """Save validated recordings and transcripts under the user's app config directory."""
 
-    def __init__(self, directory: str | Path | None = None) -> None:
+    def __init__(self, directory: str | Path | None = None, *,
+                 embedding_cache_dir: str | Path | None = None) -> None:
         self.directory = Path(directory or (default_config_dir() / "voice_profiles")).expanduser().resolve()
+        self.embedding_cache_dir = Path(embedding_cache_dir or default_config_dir() / "voice_embeddings")
         self.index_path = self.directory / "profiles.json"
 
     def list_profiles(self) -> list[VoiceProfile]:
@@ -45,8 +48,6 @@ class VoiceProfileStore:
     def save(self, name: str, audio_path: str | Path, transcript: str, language: str) -> VoiceProfile:
         clean_name = _validate_name(name)
         clean_transcript = " ".join(transcript.split())
-        if not clean_transcript:
-            raise ValueError("Transcribe the recording before saving this voice profile.")
         if language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"Voice recording language must be one of {', '.join(SUPPORTED_LANGUAGES)}.")
         validate_reference_audio(audio_path)
@@ -86,9 +87,12 @@ class VoiceProfileStore:
 
     def delete(self, profile_id: str) -> bool:
         records = self._read_index()
-        remaining = [record for record in records if record.get("profile_id") != profile_id]
-        if len(remaining) == len(records):
+        record = next((record for record in records if record.get("profile_id") == profile_id), None)
+        if record is None:
             return False
+        profile = self._profile(record)
+        remove_reference_embeddings(profile.audio_path, self.embedding_cache_dir)
+        remaining = [record for record in records if record.get("profile_id") != profile_id]
         self._write_index(remaining)
         shutil.rmtree(self.directory / profile_id, ignore_errors=True)
         return True

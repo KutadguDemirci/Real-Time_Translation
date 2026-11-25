@@ -40,11 +40,26 @@ def write_reference(path: Path, *, seconds: float = 3.0, amplitude: int = 5000) 
 
 
 class FakeModel:
+    sample_rate = 24_000
+    speaker_encoder = object()
+
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.encoder_calls: list[int] = []
+        self.used_embeddings: list[np.ndarray] = []
+
+    def extract_speaker_embedding(self, audio, sr=24_000):
+        self.encoder_calls.append(len(audio))
+        return np.asarray([[np.abs(audio).mean(), np.abs(audio).max()]], dtype=np.float32)
+
+    def condition(self, options):
+        if options["ref_text"] is not None or np.asarray(options["ref_audio"]).size != 1:
+            raise AssertionError("Generation received reference text or a full waveform")
+        self.used_embeddings.append(self.extract_speaker_embedding(options["ref_audio"]))
 
     def generate(self, **kwargs: object):
         self.calls.append(kwargs)
+        self.condition(kwargs)
         yield SimpleNamespace(audio=np.asarray([0.1, -0.1], dtype=np.float32), sample_rate=24_000)
 
 
@@ -55,6 +70,21 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
         self.enterContext(patch("platform.machine", return_value="arm64"))
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
+        self.audio_loads = []
+
+        def load_audio(path, sample_rate):
+            self.audio_loads.append(path)
+            with wave.open(path, "rb") as source:
+                rate = source.getframerate()
+                audio = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+            positions = np.arange(round(len(audio) * sample_rate / rate)) * rate / sample_rate
+            return np.interp(positions, np.arange(len(audio)), audio).astype(np.float32) / 32768
+
+        fake_mx = SimpleNamespace(array=np.asarray, zeros=np.zeros, eval=lambda *_values: None)
+        self.enterContext(patch.dict("sys.modules", {
+            "mlx": SimpleNamespace(core=fake_mx),
+            "mlx_audio.utils": SimpleNamespace(load_audio=load_audio),
+        }))
         self.model_dir = self.root / "model"
         self.model_dir.mkdir()
         (self.model_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -68,14 +98,15 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
             "voice_2": (self.reference, "Hello there."),
         }
         self.adapter = Qwen3MLXSynthesizer(
-            self.model_dir, references, model_loader=lambda _path: self.model
+            self.model_dir, references, model_loader=lambda _path: self.model,
+            embedding_cache_dir=self.root / "embeddings",
         )
 
     def tearDown(self) -> None:
         self.adapter.unload()
         self.temporary.cleanup()
 
-    def test_uses_reference_transcript_and_target_language(self) -> None:
+    def test_uses_cached_speaker_without_reference_tokens_and_keeps_target_language(self) -> None:
         result = self.adapter.synthesize("Bonjour.", SynthesisOptions(target_lang="fr"))
         self.assertEqual(result.model, "Qwen3-TTS 0.6B Base (MLX 8-bit)")
         self.assertEqual(result.sample_rate, 24_000)
@@ -85,9 +116,11 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
         self.assertEqual(call["text"], "Bonjour.")
         self.assertEqual(call["lang_code"], "french")
         self.assertNotIn("language", call)
-        self.assertEqual(call["ref_text"], "Hello there.")
+        self.assertIsNone(call["ref_text"])
         self.assertEqual(call["temperature"], 0.9)
-        self.assertTrue(Path(str(call["ref_audio"])).is_file())
+        self.assertEqual(np.asarray(call["ref_audio"]).shape, (1,))
+        self.assertEqual(len(self.model.encoder_calls), 1)
+        self.assertEqual(self.model.used_embeddings[0].shape, (1, 2))
 
     def test_default_options_are_used_by_live_translation_calls(self) -> None:
         self.adapter.set_custom_reference(self.custom, "My name is Alex.")
@@ -97,24 +130,27 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
         self.adapter.load("fr")
         result = self.adapter.synthesize("Bonjour.")
         self.assertEqual(result.target_lang, "fr")
-        self.assertEqual(self.model.calls[-1]["ref_text"], "My name is Alex.")
+        self.assertIsNone(self.model.calls[-1]["ref_text"])
         self.assertEqual(self.model.calls[-1]["temperature"], 0.6)
 
-    def test_custom_voice_requires_and_uses_exact_reference_transcript(self) -> None:
+    def test_custom_voice_uses_speaker_profile_and_clears_private_audio(self) -> None:
         self.adapter.set_custom_reference(self.custom, "My name is Alex.")
         result = self.adapter.synthesize("Bonjour.", SynthesisOptions(target_lang="fr", voice_id="custom"))
         self.assertEqual(result.target_lang, "fr")
-        self.assertEqual(self.model.calls[-1]["ref_text"], "My name is Alex.")
-        private_path = Path(str(self.model.calls[-1]["ref_audio"]))
+        self.assertIsNone(self.model.calls[-1]["ref_text"])
+        private_path = self.adapter._custom_reference
+        assert private_path is not None
         self.assertTrue(private_path.is_file())
         self.adapter.clear_custom_reference()
         self.assertFalse(private_path.exists())
-        with self.assertRaisesRegex(ValueError, "exact transcript"):
+        with self.assertRaisesRegex(ValueError, "valid reference recording"):
             self.adapter.synthesize("Hello", SynthesisOptions(voice_id="custom"))
 
-    def test_rejects_empty_reference_transcript_and_bad_options(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exact words"):
-            self.adapter.set_custom_reference(self.custom, "  ")
+    def test_accepts_audio_only_voice_and_rejects_bad_options(self) -> None:
+        self.adapter.set_custom_reference(self.custom)
+        result = self.adapter.synthesize("Hello.", SynthesisOptions(voice_id="custom"))
+        self.assertTrue(result.pcm)
+        self.assertIsNone(self.model.calls[-1]["ref_text"])
         with self.assertRaisesRegex(ValueError, "Unsupported TTS language"):
             SynthesisOptions(target_lang="xx").validate()
         with self.assertRaisesRegex(ValueError, "Speech variation"):
@@ -151,6 +187,7 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
 
         def generate(**options):
             self.model.calls.append(options)
+            self.model.condition(options)
             yield SimpleNamespace(audio=np.asarray([0.1, -0.1]), sample_rate=24_000)
             if not first_write.wait(timeout=2):
                 raise AssertionError("Playback did not start before generation resumed.")
@@ -189,7 +226,7 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
         self.assertEqual([chunk.shape for chunk in writes], [(4, 2), (4, 2)])
         self.assertTrue(self.model.calls[0]["stream"])
         self.assertEqual(self.model.calls[0]["streaming_interval"], 0.32)
-        self.assertEqual(self.model.calls[0]["ref_text"], "My name is Alex.")
+        self.assertIsNone(self.model.calls[0]["ref_text"])
         self.assertEqual(self.model.calls[0]["lang_code"], "french")
         self.assertEqual(self.model.calls[0]["temperature"], 0.6)
         event_types = [type(event) for event in events]
@@ -212,6 +249,7 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
 
         def generate(**_options):
             try:
+                self.model.condition(_options)
                 yield SimpleNamespace(audio=np.asarray([0.1, -0.1]), sample_rate=24_000)
                 yield SimpleNamespace(audio=np.asarray([2.0, -0.2]), sample_rate=24_000)
             finally:
@@ -226,6 +264,111 @@ class Qwen3MLXAdapterTests(unittest.TestCase):
             next(stream)
             stream.close()
             self.assertTrue(closed.is_set())
+
+    def test_voice_is_prepared_before_live_inference_and_reused_across_languages(self) -> None:
+        self.adapter.load("fr")
+        self.assertEqual(len(self.model.encoder_calls), 1)
+        self.assertEqual(self.model.calls, [])
+        self.adapter.synthesize("Bonjour.")
+        list(self.adapter.synthesize_stream("Bonjour encore."))
+        self.adapter.load("de")
+        self.adapter.synthesize("Guten Tag.")
+        self.assertEqual(len(self.model.encoder_calls), 1)
+        self.assertEqual(len(self.audio_loads), 1)
+        self.assertEqual(self.model.calls[-1]["lang_code"], "german")
+        for embedding in self.model.used_embeddings:
+            np.testing.assert_array_equal(embedding, self.model.used_embeddings[0])
+
+    def test_saved_embedding_is_reused_after_model_reload_without_reading_audio(self) -> None:
+        self.adapter.load("fr")
+        self.assertEqual(len(list((self.root / "embeddings").glob("*.npy"))), 1)
+        self.adapter.unload()
+        with patch.object(self.model, "extract_speaker_embedding", side_effect=AssertionError(
+            "An existing profile must not be re-encoded",
+        )):
+            self.adapter.load("en")
+            self.adapter.synthesize("Hello.")
+        self.assertEqual(len(self.audio_loads), 1)
+
+    def test_changing_voice_rebuilds_embedding_but_changing_transcript_does_not(self) -> None:
+        self.adapter.synthesize("Hello.")
+        original = self.model.used_embeddings[-1].copy()
+        write_reference(self.custom, amplitude=12000)
+        self.adapter.set_custom_reference(self.custom, "Some words.")
+        options = SynthesisOptions(voice_id="custom")
+        self.adapter.synthesize("Hello.", options)
+        different = self.model.used_embeddings[-1].copy()
+        self.assertFalse(np.array_equal(original, different))
+        self.adapter.set_custom_reference(self.custom, "A corrected transcript.")
+        self.adapter.synthesize("Hello again.", options)
+        self.assertEqual(len(self.model.encoder_calls), 2)
+        np.testing.assert_array_equal(self.model.used_embeddings[-1], different)
+
+    def test_recording_and_model_changes_invalidate_saved_embedding(self) -> None:
+        self.adapter.load("en")
+        write_reference(self.reference, amplitude=10000)
+        self.adapter.synthesize("Hello.")
+        self.assertEqual(len(self.model.encoder_calls), 2)
+        self.adapter.unload()
+        (self.model_dir / "config.json").write_text('{"changed": true}', encoding="utf-8")
+        self.adapter.load("en")
+        self.assertEqual(len(self.model.encoder_calls), 3)
+
+    def test_long_reference_is_profiled_in_bounded_chunks_with_fixed_generation_input(self) -> None:
+        write_reference(self.reference, seconds=14)
+        self.adapter.load("en")
+        self.assertEqual(self.model.encoder_calls, [6 * 24000, 6 * 24000, 2 * 24000])
+        self.adapter.synthesize("Hello.")
+        self.assertEqual(np.asarray(self.model.calls[0]["ref_audio"]).size, 1)
+        self.assertEqual(self.model.used_embeddings[0].shape, (1, 2))
+        self.assertEqual(len(self.model.encoder_calls), 3)
+
+    def test_corrupt_cache_is_rebuilt(self) -> None:
+        self.adapter.load("en")
+        path = next((self.root / "embeddings").glob("*.npy"))
+        path.write_bytes(b"invalid cache")
+        self.adapter.unload()
+        self.adapter.load("en")
+        self.assertEqual(len(self.model.encoder_calls), 2)
+        np.testing.assert_array_equal(np.load(path, allow_pickle=False),
+                                      self.adapter._speaker_embedding("voice_1"))
+
+    def test_cache_write_failure_keeps_in_memory_reuse_working(self) -> None:
+        with patch("numpy.save", side_effect=OSError("read-only cache")):
+            self.adapter.load("en")
+        self.adapter.synthesize("Hello.")
+        self.assertEqual(len(self.model.encoder_calls), 1)
+        self.assertEqual(list((self.root / "embeddings").iterdir()), [])
+
+    def test_cached_extraction_hook_is_restored_after_close_and_failure(self) -> None:
+        original = self.model.extract_speaker_embedding
+        stream = self.adapter.synthesize_stream("Hello.")
+        next(stream)
+        self.assertNotEqual(self.model.extract_speaker_embedding, original)
+        stream.close()
+        self.assertEqual(self.model.extract_speaker_embedding, original)
+
+        def failing(**options):
+            self.model.condition(options)
+            raise ValueError("generation failed")
+            yield  # Make failure happen during iteration, as in the real model.
+
+        with patch.object(self.model, "generate", side_effect=failing):
+            with self.assertRaisesRegex(RuntimeError, "could not stream"):
+                list(self.adapter.synthesize_stream("Hello."))
+        self.assertEqual(self.model.extract_speaker_embedding, original)
+
+    def test_backend_that_ignores_cached_embedding_fails_instead_of_using_wrong_voice(self) -> None:
+        original = self.model.extract_speaker_embedding
+
+        def ignoring(**_options):
+            yield SimpleNamespace(audio=np.asarray([0.1]), sample_rate=24_000)
+
+        with patch.object(self.model, "generate", side_effect=ignoring):
+            with self.assertRaisesRegex(RuntimeError, "could not stream") as raised:
+                list(self.adapter.synthesize_stream("Hello."))
+            self.assertIn("did not consume", str(raised.exception.__cause__))
+        self.assertEqual(self.model.extract_speaker_embedding, original)
 
 
 class StreamingLifecycleTests(unittest.TestCase):
